@@ -1,0 +1,1 @@
+Pin<Box<(dyn Stream<Item = Result<LogOutput, bollard::errors::Error>> + std::marker::Send + 'static)>>

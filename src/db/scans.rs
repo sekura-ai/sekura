@@ -1,0 +1,121 @@
+use chrono::Utc;
+use crate::errors::SekuraError;
+use super::Database;
+
+impl Database {
+    pub fn create_scan(
+        &self,
+        id: &str,
+        target: &str,
+        repo_path: Option<&str>,
+        intensity: &str,
+        provider: &str,
+        model: Option<&str>,
+        config_path: Option<&str>,
+        webhook_url: Option<&str>,
+    ) -> Result<(), SekuraError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO scans (id, target, repo_path, intensity, provider, model, status, config_path, webhook_url, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, ?8, ?9)",
+            rusqlite::params![id, target, repo_path, intensity, provider, model, config_path, webhook_url, Utc::now().to_rfc3339()],
+        ).map_err(|e| SekuraError::Database(format!("Failed to create scan: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn update_scan_status(&self, id: &str, status: &str) -> Result<(), SekuraError> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+        match status {
+            "running" => {
+                conn.execute(
+                    "UPDATE scans SET status = ?2, started_at = ?3 WHERE id = ?1",
+                    rusqlite::params![id, status, now],
+                ).map_err(|e| SekuraError::Database(format!("Update failed: {}", e)))?;
+            }
+            "completed" | "failed" => {
+                conn.execute(
+                    "UPDATE scans SET status = ?2, completed_at = ?3 WHERE id = ?1",
+                    rusqlite::params![id, status, now],
+                ).map_err(|e| SekuraError::Database(format!("Update failed: {}", e)))?;
+            }
+            _ => {
+                conn.execute(
+                    "UPDATE scans SET status = ?2 WHERE id = ?1",
+                    rusqlite::params![id, status],
+                ).map_err(|e| SekuraError::Database(format!("Update failed: {}", e)))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn get_scan(&self, id: &str) -> Result<Option<serde_json::Value>, SekuraError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, target, repo_path, intensity, provider, model, status, current_phase, completed_agents, finding_count_critical, finding_count_high, finding_count_medium, finding_count_low, finding_count_info, total_cost_usd, total_duration_ms, error_message, created_at, started_at, completed_at FROM scans WHERE id = ?1"
+        ).map_err(|e| SekuraError::Database(format!("Query failed: {}", e)))?;
+
+        let result = stmt.query_row(rusqlite::params![id], |row: &rusqlite::Row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "target": row.get::<_, String>(1)?,
+                "repo_path": row.get::<_, Option<String>>(2)?,
+                "intensity": row.get::<_, String>(3)?,
+                "provider": row.get::<_, String>(4)?,
+                "model": row.get::<_, Option<String>>(5)?,
+                "status": row.get::<_, String>(6)?,
+                "current_phase": row.get::<_, Option<String>>(7)?,
+                "completed_agents": row.get::<_, Option<String>>(8)?,
+                "finding_counts": {
+                    "critical": row.get::<_, i64>(9)?,
+                    "high": row.get::<_, i64>(10)?,
+                    "medium": row.get::<_, i64>(11)?,
+                    "low": row.get::<_, i64>(12)?,
+                    "info": row.get::<_, i64>(13)?,
+                },
+                "total_cost_usd": row.get::<_, f64>(14)?,
+                "total_duration_ms": row.get::<_, i64>(15)?,
+                "error": row.get::<_, Option<String>>(16)?,
+                "created_at": row.get::<_, String>(17)?,
+                "started_at": row.get::<_, Option<String>>(18)?,
+                "completed_at": row.get::<_, Option<String>>(19)?,
+            }))
+        });
+
+        match result {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(SekuraError::Database(format!("Query error: {}", e))),
+        }
+    }
+
+    pub fn list_scans(&self, limit: usize, offset: usize) -> Result<Vec<serde_json::Value>, SekuraError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, target, status, intensity, created_at, completed_at FROM scans ORDER BY created_at DESC LIMIT ?1 OFFSET ?2"
+        ).map_err(|e| SekuraError::Database(format!("Query failed: {}", e)))?;
+
+        let rows = stmt.query_map(rusqlite::params![limit as i64, offset as i64], |row: &rusqlite::Row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "target": row.get::<_, String>(1)?,
+                "status": row.get::<_, String>(2)?,
+                "intensity": row.get::<_, String>(3)?,
+                "created_at": row.get::<_, String>(4)?,
+                "completed_at": row.get::<_, Option<String>>(5)?,
+            }))
+        }).map_err(|e| SekuraError::Database(format!("Query error: {}", e)))?;
+
+        let mut results: Vec<serde_json::Value> = Vec::new();
+        for row in rows {
+            results.push(row.map_err(|e| SekuraError::Database(format!("Row error: {}", e)))?);
+        }
+        Ok(results)
+    }
+
+    pub fn delete_scan(&self, id: &str) -> Result<bool, SekuraError> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute("DELETE FROM scans WHERE id = ?1", rusqlite::params![id])
+            .map_err(|e| SekuraError::Database(format!("Delete failed: {}", e)))?;
+        Ok(affected > 0)
+    }
+}
