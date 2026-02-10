@@ -18,6 +18,7 @@ use crate::repl::banner;
 use crate::repl::commands::{self, ContainerAction, SlashCommand};
 use crate::repl::completer::ReplHelper;
 use crate::repl::events::PipelineEvent;
+use crate::repl::progress::ScanProgress;
 use crate::repl::renderer;
 
 /// Shared state for the REPL session.
@@ -118,12 +119,14 @@ impl ReplSession {
             .map_err(|e| SekuraError::Internal(format!("Failed to create printer: {}", e)))?;
         let printer = Arc::new(tokio::sync::Mutex::new(printer));
 
-        // Spawn event receiver task that prints pipeline events via ExternalPrinter
+        // Spawn event receiver task that renders pipeline events with progress bars
         let printer_clone = printer.clone();
         let state_clone = state.clone();
         let event_task = tokio::spawn(async move {
+            let mut progress: Option<ScanProgress> = None;
+
             while let Some(event) = event_rx.recv().await {
-                // Track findings
+                // Track findings in session state
                 if let PipelineEvent::FindingDiscovered {
                     ref title,
                     ref severity,
@@ -134,14 +137,13 @@ impl ReplSession {
                     s.findings.push((title.clone(), severity.clone(), category.clone()));
                 }
 
-                // Track completion
+                // Track completion in session state
                 if let PipelineEvent::PipelineCompleted {
                     total_findings, ..
                 } = &event
                 {
                     let mut s = state_clone.lock().await;
                     s.scan_running = false;
-                    // Update last history entry
                     if let Some(last) = s.history.last_mut() {
                         last.2 = "completed".into();
                         last.3 = *total_findings;
@@ -155,10 +157,46 @@ impl ReplSession {
                     }
                 }
 
-                let line = renderer::render_event(&event);
-                let mut p = printer_clone.lock().await;
-                // ExternalPrinter::print expects a newline-terminated string
-                let _ = p.print(format!("{}\n", line));
+                // Create progress display on scan start
+                if let PipelineEvent::PipelineStarted { .. } = &event {
+                    progress = Some(ScanProgress::new());
+                }
+
+                if let Some(ref mut prog) = progress {
+                    // Update progress bars
+                    prog.handle_event(&event);
+
+                    // Print text for events that aren't already shown by progress bars.
+                    // Phase/technique events are handled visually by bars — no text needed.
+                    match &event {
+                        PipelineEvent::PipelineStarted { .. }
+                        | PipelineEvent::FindingDiscovered { .. }
+                        | PipelineEvent::AgentStarted { .. }
+                        | PipelineEvent::AgentCompleted { .. }
+                        | PipelineEvent::AgentFailed { .. }
+                        | PipelineEvent::Log { .. } => {
+                            let line = renderer::render_event(&event);
+                            prog.println(&line);
+                        }
+                        // CostWarning already calls println inside handle_event
+                        // Phase/Technique/Completed/Failed are shown via bars
+                        _ => {}
+                    }
+
+                    // Clean up progress on completion/failure
+                    if matches!(
+                        &event,
+                        PipelineEvent::PipelineCompleted { .. }
+                            | PipelineEvent::PipelineFailed { .. }
+                    ) {
+                        progress = None;
+                    }
+                } else {
+                    // No active scan — fall back to plain-text ExternalPrinter
+                    let line = renderer::render_event(&event);
+                    let mut p = printer_clone.lock().await;
+                    let _ = p.print(format!("{}\n", line));
+                }
             }
         });
 
@@ -622,7 +660,10 @@ impl ReplSession {
                 let event_tx = event_tx.clone();
                 let state_clone = state.clone();
 
-                // Store cancel token and pipeline state
+                // Store cancel token and pipeline state.
+                // Clone the token so we can pass it to the orchestrator while
+                // the session keeps the original for /stop.
+                let pipeline_token = cancel_token.clone();
                 {
                     let mut s = state.lock().await;
                     s.cancel_token = Some(cancel_token);
@@ -643,10 +684,12 @@ impl ReplSession {
                                 s.pipeline_state = Some(orchestrator.state());
                             }
 
-                            // Set up the orchestrator's event channel
-                            let orch_with_events = orchestrator.with_event_channel(event_tx.clone());
+                            // Wire the session's cancel token + event channel into the orchestrator
+                            let orch_ready = orchestrator
+                                .with_cancel_token(pipeline_token)
+                                .with_event_channel(event_tx.clone());
 
-                            match orch_with_events.run().await {
+                            match orch_ready.run().await {
                                 Ok(_summary) => {
                                     // PipelineCompleted event is already emitted by the orchestrator
                                 }
@@ -665,6 +708,10 @@ impl ReplSession {
                             s.scan_running = false;
                         }
                     }
+
+                    // Mark scan as no longer running regardless of outcome
+                    let mut s = state_clone.lock().await;
+                    s.scan_running = false;
                 });
             }
         }

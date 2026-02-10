@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use console::style;
-use crate::pipeline::state::PhaseName;
 use crate::repl::events::PipelineEvent;
 
 /// Manages indicatif multi-progress bars during pipeline execution.
@@ -21,15 +20,15 @@ impl ScanProgress {
     pub fn new() -> Self {
         let multi = MultiProgress::new();
 
-        // Status bar at the bottom showing overall progress
+        // Status bar at the bottom showing elapsed / cost / findings
         let status_bar = multi.add(ProgressBar::new_spinner());
         status_bar.set_style(
             ProgressStyle::default_spinner()
-                .template("{spinner:.cyan} {msg}")
+                .template("  {spinner:.cyan} {msg}")
                 .unwrap()
         );
         status_bar.set_message("Initializing scan...");
-        status_bar.enable_steady_tick(std::time::Duration::from_millis(100));
+        status_bar.enable_steady_tick(std::time::Duration::from_millis(120));
 
         Self {
             multi,
@@ -60,7 +59,10 @@ impl ScanProgress {
                 self.phase_bar = Some(bar);
             }
             PipelineEvent::PhaseStarted { display_name, .. } => {
-                self.status_bar.set_message(format!("{}", display_name));
+                if let Some(bar) = &self.phase_bar {
+                    bar.set_message(display_name.clone());
+                }
+                self.update_status();
             }
             PipelineEvent::PhaseCompleted { .. } => {
                 if let Some(bar) = &self.phase_bar {
@@ -81,14 +83,9 @@ impl ScanProgress {
                 bar.enable_steady_tick(std::time::Duration::from_millis(100));
                 self.technique_bars.insert(technique_name.clone(), bar);
             }
-            PipelineEvent::TechniqueCompleted { technique_name, findings_count } => {
+            PipelineEvent::TechniqueCompleted { technique_name, .. } => {
                 if let Some(bar) = self.technique_bars.remove(technique_name) {
-                    let msg = if *findings_count > 0 {
-                        format!("{} → {} findings", technique_name, findings_count)
-                    } else {
-                        format!("{}", technique_name)
-                    };
-                    bar.finish_with_message(format!("✓ {}", msg));
+                    bar.finish_and_clear();
                 }
             }
             PipelineEvent::FindingDiscovered { .. } => {
