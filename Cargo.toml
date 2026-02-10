@@ -97,6 +97,7 @@ rand = "0.8"
 
 # Tar (for docker copy)
 tar = "0.4"
+tui-banner = "0.2.3"
 
 [build-dependencies]
 chrono = "0.4"
