@@ -11,7 +11,6 @@ pub struct ScanProgress {
     status_bar: ProgressBar,
     findings_count: usize,
     cost_usd: f64,
-    start_time: std::time::Instant,
 }
 
 const PHASE_COUNT: u64 = 5;
@@ -20,14 +19,16 @@ impl ScanProgress {
     pub fn new() -> Self {
         let multi = MultiProgress::new();
 
-        // Status bar at the bottom showing elapsed / cost / findings
+        // Status bar at the bottom showing elapsed / cost / findings.
+        // {elapsed_precise} is driven by indicatif's steady tick so it
+        // updates in real-time without requiring manual refresh.
         let status_bar = multi.add(ProgressBar::new_spinner());
         status_bar.set_style(
             ProgressStyle::default_spinner()
-                .template("  {spinner:.cyan} {msg}")
+                .template("  {spinner:.cyan} {elapsed_precise} | {msg}")
                 .unwrap()
         );
-        status_bar.set_message("Initializing scan...");
+        status_bar.set_message("$0.0000 | 0 findings");
         status_bar.enable_steady_tick(std::time::Duration::from_millis(120));
 
         Self {
@@ -37,7 +38,6 @@ impl ScanProgress {
             status_bar,
             findings_count: 0,
             cost_usd: 0.0,
-            start_time: std::time::Instant::now(),
         }
     }
 
@@ -135,11 +135,9 @@ impl ScanProgress {
     }
 
     fn update_status(&self) {
-        let elapsed = self.start_time.elapsed();
-        let elapsed_str = format_elapsed(elapsed.as_millis() as u64);
         self.status_bar.set_message(format!(
-            "{} | ${:.4} | {} findings",
-            elapsed_str, self.cost_usd, self.findings_count,
+            "${:.4} | {} findings",
+            self.cost_usd, self.findings_count,
         ));
     }
 

@@ -9,14 +9,15 @@ use crate::queue::{ExploitationQueue, VulnType};
 use tracing::{info, warn, debug};
 
 /// Runs the LLM-based vulnerability analysis for a single vuln category.
-/// Returns the parsed exploitation queue and any findings extracted during analysis.
+/// Returns the parsed exploitation queue, findings extracted during analysis,
+/// and the LLM cost in USD (if available from the provider).
 pub async fn run_vuln_analysis(
     vuln_type: VulnType,
     llm: Arc<dyn LLMProvider>,
     prompt_loader: Arc<PromptLoader>,
     config: &PipelineConfig,
     context: &ScanContext,
-) -> Result<(ExploitationQueue, Vec<Finding>), SekuraError> {
+) -> Result<(ExploitationQueue, Vec<Finding>, Option<f64>), SekuraError> {
     let deliverables_dir = config.deliverables_dir();
     let prompt_name = format!("vuln-{}", vuln_type.as_str());
 
@@ -78,6 +79,7 @@ pub async fn run_vuln_analysis(
 
     info!(vuln_type = %vuln_type.as_str(), "Running LLM vulnerability analysis");
     let response = llm.complete(&prompt, Some(&system)).await?;
+    let cost_usd = response.cost_usd;
 
     // Write the analysis deliverable
     let analysis_filename = vuln_type.analysis_filename();
@@ -101,7 +103,7 @@ pub async fn run_vuln_analysis(
     // Extract findings from the analysis for the accumulator
     let findings = queue_to_findings(&queue, vuln_type);
 
-    Ok((queue, findings))
+    Ok((queue, findings, cost_usd))
 }
 
 /// Build prompt variables with all available deliverable contents.

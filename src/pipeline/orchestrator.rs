@@ -466,30 +466,46 @@ impl PipelineOrchestrator {
             tokio::spawn(async move {
                 // Phase 3: Vulnerability Analysis
                 info!(vuln_type = %vt.as_str(), "Starting vuln analysis pipeline");
+                let vuln_agent_name = format!("{} vulnerability analysis", vt.as_str());
                 if let Some(ref tx) = event_tx {
                     let _ = tx.send(PipelineEvent::TechniqueRunning {
-                        technique_name: format!("{} vulnerability analysis", vt.as_str()),
+                        technique_name: vuln_agent_name.clone(),
                         layer: "vulnerability-analysis".to_string(),
                     });
                 }
 
+                let vuln_start = std::time::Instant::now();
                 let vuln_result = crate::agents::vuln::run_vuln_analysis(
                     vt, llm.clone(), prompt_loader.clone(), &config, &context,
                 ).await;
 
-                let (queue, vuln_findings) = match vuln_result {
+                let (queue, vuln_findings, vuln_cost) = match vuln_result {
                     Ok(result) => result,
                     Err(e) => {
                         warn!(vuln_type = %vt.as_str(), error = %e, "Vuln analysis failed");
                         if let Some(ref tx) = event_tx {
+                            let _ = tx.send(PipelineEvent::AgentFailed {
+                                agent_name: vuln_agent_name.clone(),
+                                error: e.to_string(),
+                            });
                             let _ = tx.send(PipelineEvent::TechniqueCompleted {
-                                technique_name: format!("{} vulnerability analysis", vt.as_str()),
+                                technique_name: vuln_agent_name,
                                 findings_count: 0,
                             });
                         }
                         return;
                     }
                 };
+                let vuln_duration_ms = vuln_start.elapsed().as_millis() as u64;
+
+                // Emit AgentCompleted with cost for the progress bar
+                if let Some(ref tx) = event_tx {
+                    let _ = tx.send(PipelineEvent::AgentCompleted {
+                        agent_name: vuln_agent_name.clone(),
+                        duration_ms: vuln_duration_ms,
+                        cost_usd: vuln_cost,
+                    });
+                }
 
                 // Accumulate vuln analysis findings
                 {
@@ -508,27 +524,40 @@ impl PipelineOrchestrator {
 
                 if let Some(ref tx) = event_tx {
                     let _ = tx.send(PipelineEvent::TechniqueCompleted {
-                        technique_name: format!("{} vulnerability analysis", vt.as_str()),
+                        technique_name: vuln_agent_name,
                         findings_count: queue.vulnerabilities.len(),
                     });
                 }
 
                 // Phase 4: Exploitation
                 info!(vuln_type = %vt.as_str(), queue_size = queue.vulnerabilities.len(), "Starting exploitation pipeline");
+                let exploit_agent_name = format!("{} exploitation", vt.as_str());
                 if let Some(ref tx) = event_tx {
                     let _ = tx.send(PipelineEvent::TechniqueRunning {
-                        technique_name: format!("{} exploitation", vt.as_str()),
+                        technique_name: exploit_agent_name.clone(),
                         layer: "exploitation".to_string(),
                     });
                 }
 
+                let exploit_start = std::time::Instant::now();
                 let exploit_result = crate::agents::exploit::run_exploitation(
                     vt, &queue, llm, prompt_loader, &config,
                 ).await;
 
                 match exploit_result {
-                    Ok(exploit_findings) => {
+                    Ok((exploit_findings, exploit_cost)) => {
+                        let exploit_duration_ms = exploit_start.elapsed().as_millis() as u64;
                         let count = exploit_findings.len();
+
+                        // Emit AgentCompleted with cost
+                        if let Some(ref tx) = event_tx {
+                            let _ = tx.send(PipelineEvent::AgentCompleted {
+                                agent_name: exploit_agent_name.clone(),
+                                duration_ms: exploit_duration_ms,
+                                cost_usd: exploit_cost,
+                            });
+                        }
+
                         let mut acc = findings_acc.write().await;
                         for f in &exploit_findings {
                             if let Some(ref tx) = event_tx {
@@ -544,12 +573,18 @@ impl PipelineOrchestrator {
                     }
                     Err(e) => {
                         warn!(vuln_type = %vt.as_str(), error = %e, "Exploitation failed");
+                        if let Some(ref tx) = event_tx {
+                            let _ = tx.send(PipelineEvent::AgentFailed {
+                                agent_name: exploit_agent_name.clone(),
+                                error: e.to_string(),
+                            });
+                        }
                     }
                 }
 
                 if let Some(ref tx) = event_tx {
                     let _ = tx.send(PipelineEvent::TechniqueCompleted {
-                        technique_name: format!("{} exploitation", vt.as_str()),
+                        technique_name: exploit_agent_name,
                         findings_count: 0,
                     });
                 }

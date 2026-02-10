@@ -202,6 +202,45 @@ impl ReplSession {
 
         // Main readline loop
         loop {
+            // If a scan is running, yield the terminal to the indicatif
+            // MultiProgress bars instead of showing a readline prompt.
+            // Readline's raw-mode terminal control conflicts with MultiProgress
+            // redraws, causing frozen/garbled output.
+            {
+                let is_running = state.lock().await.scan_running;
+                if is_running {
+                    loop {
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
+                                if !state.lock().await.scan_running {
+                                    break;
+                                }
+                            }
+                            result = tokio::signal::ctrl_c() => {
+                                if result.is_ok() {
+                                    let s = state.lock().await;
+                                    if s.scan_running {
+                                        if let Some(ref token) = s.cancel_token {
+                                            if token.is_cancelled() {
+                                                // Already cancelled — force exit wait
+                                                drop(s);
+                                                break;
+                                            }
+                                            token.cancel();
+                                        }
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Small pause to let progress bars finish drawing
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+            }
+
             let readline = {
                 // rustyline is blocking, so use spawn_blocking
                 let result = tokio::task::spawn_blocking({
@@ -246,18 +285,8 @@ impl ReplSession {
                     }
                 }
                 Err(ReadlineError::Interrupted) => {
-                    // Ctrl-C: if scan is running, offer to stop it
-                    let s = state.lock().await;
-                    if s.scan_running {
-                        drop(s);
-                        println!(
-                            "{}",
-                            renderer::render_info("Scan running. Use /stop to cancel, or Ctrl-C again to quit.")
-                        );
-                    } else {
-                        println!();
-                        break;
-                    }
+                    println!();
+                    break;
                 }
                 Err(ReadlineError::Eof) => {
                     println!();
