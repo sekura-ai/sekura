@@ -1,0 +1,55 @@
+FROM kalilinux/kali-rolling
+
+RUN apt-get update && apt-get install -y \
+    nmap masscan hping3 \
+    nikto dirb gobuster wfuzz \
+    sqlmap \
+    hydra medusa \
+    testssl.sh sslscan \
+    arp-scan arping \
+    tcpdump \
+    traceroute \
+    net-tools iputils-ping dnsutils whois \
+    metasploit-framework \
+    enum4linux smbclient \
+    aircrack-ng \
+    curl wget \
+    wordlists seclists \
+    whatweb commix ffuf \
+    snmp snmpd onesixtyone \
+    ldap-utils \
+    python3 python3-pip pipx \
+    golang-go \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install subfinder (passive subdomain enumeration)
+RUN go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest && \
+    mv /root/go/bin/subfinder /usr/local/bin/ || true
+
+# Install schemathesis (API schema fuzzing)
+RUN pipx install schemathesis || pip3 install --break-system-packages schemathesis || true
+
+# Ensure metasploit wordlist paths exist (wordlists package may already link them)
+RUN mkdir -p /usr/share/wordlists/metasploit && \
+    [ -e /usr/share/wordlists/metasploit/unix_passwords.txt ] || \
+        ln -sf /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt \
+               /usr/share/wordlists/metasploit/unix_passwords.txt && \
+    [ -e /usr/share/wordlists/metasploit/unix_users.txt ] || \
+        ln -sf /usr/share/metasploit-framework/data/wordlists/unix_users.txt \
+               /usr/share/wordlists/metasploit/unix_users.txt
+
+WORKDIR /pentest
+
+# GHDB Dork Scanner
+RUN mkdir -p /pentest/data
+COPY scripts/ghdb_scanner.py /pentest/ghdb_scanner.py
+COPY data/ghdb.xml /pentest/data/ghdb.xml
+
+# Metasploit Auxiliary Scanner
+COPY scripts/msf_scanner.py /pentest/msf_scanner.py
+
+# Initialize MSF database (speeds up first msfconsole run)
+RUN msfdb init 2>/dev/null || true
+
+CMD ["sleep", "infinity"]

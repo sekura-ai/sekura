@@ -1,0 +1,120 @@
+layer: application
+description: "Layer 7 - Web application and API security testing"
+techniques:
+  - name: "Web Server Scan"
+    tool: nikto
+    command: "nikto -h {target_url} -C all -Tuning 123bde -maxtime 120s"
+    description: "Comprehensive web server vulnerability scan"
+    intensity: standard
+    timeout: 300
+    parse_hint: "Identify server misconfigurations, outdated software, dangerous files, and known vulnerabilities"
+
+  - name: "Directory Bruteforce"
+    tool: gobuster
+    command: "gobuster dir -u {target_url} -w /usr/share/wordlists/dirb/common.txt -t 50 -q --no-error"
+    description: "Discover hidden directories and files"
+    intensity: standard
+    timeout: 180
+    parse_hint: "Look for admin panels, backup files, configuration files, and sensitive directories"
+
+  - name: "SQL Injection Scan"
+    tool: sqlmap
+    command: "sqlmap -u '{target_url}' --batch --level=2 --risk=2 --output-dir=/tmp/sqlmap --forms --crawl=2"
+    description: "Automated SQL injection detection"
+    intensity: standard
+    timeout: 300
+    parse_hint: "Identify injectable parameters, database types, and data exposure risks"
+
+  - name: "HTTP Header Analysis"
+    tool: curl
+    command: "curl -sI {target_url}"
+    description: "Analyze HTTP response headers for security issues"
+    intensity: quick
+    timeout: 30
+    parse_hint: "Check for missing security headers (X-Frame-Options, CSP, HSTS, X-Content-Type-Options)"
+
+  - name: "Deep Directory Scan"
+    tool: dirb
+    command: "dirb {target_url} /usr/share/wordlists/dirb/big.txt -S -r -N 302"
+    description: "Extended directory enumeration with larger wordlist"
+    intensity: thorough
+    timeout: 600
+    parse_hint: "Identify additional hidden paths, API endpoints, and backup files"
+
+  - name: "Web Fuzzing"
+    tool: wfuzz
+    command: "wfuzz -c -z file,/usr/share/wordlists/dirb/common.txt --hc 404,302 {target_url}/FUZZ"
+    description: "Fuzz web application paths for hidden content"
+    intensity: thorough
+    timeout: 300
+    parse_hint: "Look for unusual response codes, hidden endpoints, and application logic exposure"
+
+  - name: "Web Technology Fingerprint"
+    tool: whatweb
+    command: "whatweb -a 3 {target_url}"
+    description: "Identify web technologies, CMS, frameworks, and server details"
+    intensity: quick
+    timeout: 60
+    parse_hint: "Identify CMS, framework versions, server software, programming languages, and JavaScript libraries"
+
+  - name: "Fast Directory Fuzz"
+    tool: ffuf
+    command: "ffuf -u {target_url}/FUZZ -w /usr/share/seclists/Discovery/Web-Content/common.txt -mc 200,301,403 -t 50 -s"
+    description: "Fast web fuzzer for content discovery"
+    intensity: standard
+    timeout: 120
+    parse_hint: "Identify hidden directories, files, API endpoints, and admin panels from response codes"
+
+  - name: "Sensitive Path Discovery"
+    tool: curl
+    command: "for path in robots.txt .env .git/config sitemap.xml wp-config.php .htaccess server-status server-info; do echo \"--- $path ---\"; curl -sk -o /dev/null -w '%{http_code} %{size_download}b' {target_url}/$path; echo; done"
+    description: "Probe for commonly exposed sensitive files and paths"
+    intensity: standard
+    timeout: 60
+    parse_hint: >
+      Analyze HTTP status codes for each probed path. 200 responses indicate
+      exposed files — check content size to filter false positives from generic
+      error pages. 403 responses suggest the path exists but is forbidden.
+      Prioritize .env (credentials), .git/config (source exposure),
+      wp-config.php (database creds), and server-status (information disclosure).
+
+  - name: "HTTPS Header Analysis"
+    tool: curl
+    command: "curl -skI https://{target}"
+    description: "Analyze HTTPS response headers"
+    intensity: quick
+    timeout: 30
+    parse_hint: "Check for security headers on HTTPS endpoint, HSTS configuration, cookie flags"
+
+  - name: "API Spec Discovery"
+    tool: curl
+    command: "for spec_path in openapi.json swagger.json api-docs docs/openapi.json v1/openapi.json v2/openapi.json v3/openapi.json api/v1/openapi.json api/swagger.json; do echo \"--- $spec_path ---\"; curl -sk -o /dev/null -w '%{http_code} %{size_download}b' {target_url}/$spec_path; echo; done"
+    description: "Probe for OpenAPI/Swagger specification files"
+    intensity: standard
+    timeout: 60
+    parse_hint: "200 responses indicate an exposed API spec. Note the URL for schema fuzzing. Exposed API specifications reveal all endpoints, parameters, and data models"
+
+  - name: "API Schema Fuzzing"
+    tool: schemathesis
+    command: "schemathesis run {target_url}/openapi.json --stateful=links --checks all --dry-run 2>/dev/null || schemathesis run {target_url}/swagger.json --stateful=links --checks all --dry-run 2>/dev/null || echo 'No API spec found'"
+    description: "Automated API testing against OpenAPI/Swagger specifications"
+    intensity: standard
+    depends_on: "API Spec Discovery"
+    timeout: 600
+    parse_hint: "Identify API vulnerabilities including type coercion, validation bypass, authentication issues, server errors (5xx), and conformance violations. Each failure indicates a potential security or reliability issue"
+
+  - name: "GHDB Dork Scan"
+    tool: ghdb_scanner
+    command: "python3 /pentest/ghdb_scanner.py --target-url {target_url} --intensity {intensity} --cookie '{cookie_string}'"
+    description: "Probe target with Google Hacking Database dorks converted to direct HTTP requests"
+    intensity: standard
+    timeout: 600
+    depends_on: "Web Server Scan"
+    parse_hint: >
+      Analyze GHDB dork scan results for exposed sensitive files, directories,
+      login portals, configuration files, backup files, and information disclosure.
+      Each finding includes the original Google dork, probed URL, HTTP status,
+      and response details. Prioritize 200 responses with sensitive content.
+      Status 403 is informational (path exists but forbidden). Validate that
+      findings represent actual security issues, not false positives from
+      generic error pages or redirects.

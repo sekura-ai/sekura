@@ -26,6 +26,14 @@ pub fn resolve_command(template: &str, context: &ScanContext) -> String {
         cmd = cmd.replace("{cookie_file}", &cookie_file.to_string_lossy());
     }
 
+    // Ensure cookie placeholders resolve to empty for unauthenticated scans
+    if context.cookie_string.is_none() {
+        cmd = cmd.replace("{cookie_string}", "");
+    }
+    if context.cookie_file.is_none() {
+        cmd = cmd.replace("{cookie_file}", "");
+    }
+
     if let Some(web_port) = context.web_port {
         cmd = cmd.replace("{web_port}", &web_port.to_string());
     }
@@ -119,5 +127,23 @@ mod tests {
         ctx.extra.insert("domain".to_string(), "example.com".to_string());
         let cmd = resolve_command("dig axfr @{target} {domain}", &ctx);
         assert_eq!(cmd, "dig axfr @192.168.1.1 example.com");
+    }
+
+    #[test]
+    fn test_cookie_string_resolves_empty_when_none() {
+        let mut ctx = make_context();
+        ctx.cookie_string = None;
+        let cmd = resolve_command("python3 scanner.py --cookie '{cookie_string}'", &ctx);
+        assert_eq!(cmd, "python3 scanner.py --cookie ''");
+        assert!(!has_unresolved(&cmd));
+    }
+
+    #[test]
+    fn test_cookie_file_resolves_empty_when_none() {
+        let mut ctx = make_context();
+        ctx.cookie_file = None;
+        let cmd = resolve_command("curl -b {cookie_file} {target_url}", &ctx);
+        assert_eq!(cmd, "curl -b  http://192.168.1.1:8080");
+        assert!(!has_unresolved(&cmd));
     }
 }
