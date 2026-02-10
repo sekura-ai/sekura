@@ -57,6 +57,7 @@ impl ScanProgress {
                 );
                 bar.set_message(format!("Scanning {}", target));
                 self.phase_bar = Some(bar);
+                self.update_status();
             }
             PipelineEvent::PhaseStarted { display_name, .. } => {
                 if let Some(bar) = &self.phase_bar {

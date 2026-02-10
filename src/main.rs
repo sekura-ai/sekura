@@ -28,9 +28,11 @@ use tracing_subscriber::EnvFilter;
 async fn main() {
     let cli = cli::Cli::parse();
 
-    // Initialize logging
+    // Initialize logging — REPL mode defaults to warn since the event system
+    // handles display; tracing INFO logs conflict with indicatif progress bars.
+    let is_repl = cli.command.is_none();
     let log_level = match cli.verbose {
-        0 => "info",
+        0 => if is_repl { "warn" } else { "info" },
         1 => "debug",
         _ => "trace",
     };

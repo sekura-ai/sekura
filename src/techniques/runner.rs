@@ -12,6 +12,9 @@ use super::sorter::topological_sort;
 use super::dedup::deduplicate_findings;
 use crate::audit::AuditSession;
 use crate::auth::cookie_injector::inject_cookies;
+use crate::repl::events::PipelineEvent;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, debug, warn};
 
 /// Scope enforcement rules parsed from config avoid/focus strings.
@@ -81,6 +84,8 @@ pub struct TechniqueRunner {
     scope: ScopeRules,
     dry_run: bool,
     audit: Option<Arc<AuditSession>>,
+    cancel_token: CancellationToken,
+    event_tx: Option<mpsc::UnboundedSender<PipelineEvent>>,
 }
 
 impl TechniqueRunner {
@@ -90,7 +95,12 @@ impl TechniqueRunner {
         llm: Arc<dyn LLMProvider>,
         prompt_loader: Arc<PromptLoader>,
     ) -> Self {
-        Self { container, context, llm, prompt_loader, scope: ScopeRules::default(), dry_run: false, audit: None }
+        Self {
+            container, context, llm, prompt_loader,
+            scope: ScopeRules::default(), dry_run: false, audit: None,
+            cancel_token: CancellationToken::new(),
+            event_tx: None,
+        }
     }
 
     /// Set scope enforcement rules (avoid/focus patterns).
@@ -111,9 +121,22 @@ impl TechniqueRunner {
         self
     }
 
+    /// Attach a cancellation token so techniques can be interrupted mid-execution.
+    pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
+        self.cancel_token = token;
+        self
+    }
+
+    /// Attach an event channel for per-technique progress reporting.
+    pub fn with_event_channel(mut self, tx: mpsc::UnboundedSender<PipelineEvent>) -> Self {
+        self.event_tx = Some(tx);
+        self
+    }
+
     pub async fn run_techniques(
         &self,
         techniques: &[TechniqueDefinition],
+        layer: &str,
     ) -> Result<(Vec<Finding>, HashMap<String, String>), SekuraError> {
         let sorted = topological_sort(techniques)?;
         let mut findings = Vec::new();
@@ -128,6 +151,12 @@ impl TechniqueRunner {
         }
 
         for technique in &sorted {
+            // Check cancellation before each technique
+            if self.cancel_token.is_cancelled() {
+                info!("Scan cancelled — stopping technique execution");
+                break;
+            }
+
             // Check port dependencies
             if let Some(required_ports) = &technique.depends_on_ports {
                 if !required_ports.iter().any(|p| self.context.open_ports.contains(p)) {
@@ -178,9 +207,36 @@ impl TechniqueRunner {
 
             info!(technique = %technique.name, tool = %technique.tool, "Running technique");
 
-            // Execute in Kali container with audit logging
+            // Emit per-technique progress event
+            if let Some(ref tx) = self.event_tx {
+                let _ = tx.send(PipelineEvent::TechniqueRunning {
+                    technique_name: technique.name.clone(),
+                    layer: layer.to_string(),
+                });
+            }
+
+            // Execute in Kali container with audit logging.
+            // Race against the cancellation token so /stop interrupts long-running commands.
             let exec_start = std::time::Instant::now();
-            match self.container.exec(&command, technique.timeout).await {
+            let exec_future = self.container.exec(&command, technique.timeout);
+            let cancel_future = self.cancel_token.cancelled();
+
+            let exec_result = tokio::select! {
+                result = exec_future => result,
+                _ = cancel_future => {
+                    let duration_ms = exec_start.elapsed().as_millis() as u64;
+                    if let Some(ref audit) = self.audit {
+                        audit.record_container_exec(&command, -2, duration_ms, 0).await;
+                    }
+                    info!(technique = %technique.name, "Technique cancelled by user");
+                    raw_outputs.insert(technique.name.clone(), "[CANCELLED]".to_string());
+                    break;
+                }
+            };
+
+            let findings_before = findings.len();
+
+            match exec_result {
                 Ok(output) => {
                     let duration_ms = exec_start.elapsed().as_millis() as u64;
                     if let Some(ref audit) = self.audit {
@@ -209,6 +265,14 @@ impl TechniqueRunner {
                         format!("[ERROR] {}", e),
                     );
                 }
+            }
+
+            // Emit per-technique completion
+            if let Some(ref tx) = self.event_tx {
+                let _ = tx.send(PipelineEvent::TechniqueCompleted {
+                    technique_name: technique.name.clone(),
+                    findings_count: findings.len() - findings_before,
+                });
             }
         }
 

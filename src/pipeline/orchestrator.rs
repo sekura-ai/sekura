@@ -77,6 +77,13 @@ impl PipelineOrchestrator {
         })
     }
 
+    /// Replace the orchestrator's cancel token with an external one (e.g. from the REPL session).
+    /// This ensures that calling `.cancel()` on the external token actually stops the pipeline.
+    pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
+        self.cancel_token = token;
+        self
+    }
+
     /// Attach an event channel for streaming pipeline events to a REPL or other consumer.
     pub fn with_event_channel(mut self, tx: mpsc::UnboundedSender<PipelineEvent>) -> Self {
         self.event_tx = Some(tx);
@@ -295,7 +302,7 @@ impl PipelineOrchestrator {
 
         // Phase 1: White-box analysis
         if self.config.has_repo() && !self.config.skip_whitebox {
-            self.check_cancelled()?;
+            self.check_cancelled().await?;
             info!("Phase 1: White-box Analysis");
             self.set_phase(PhaseName::WhiteboxAnalysis).await;
             self.emit_phase_started(&PhaseName::WhiteboxAnalysis);
@@ -306,7 +313,7 @@ impl PipelineOrchestrator {
 
         // Phase 2: Reconnaissance
         if !self.config.skip_blackbox {
-            self.check_cancelled()?;
+            self.check_cancelled().await?;
             self.check_cost_budget().await?;
             info!("Phase 2: Reconnaissance");
             self.set_phase(PhaseName::Reconnaissance).await;
@@ -316,29 +323,28 @@ impl PipelineOrchestrator {
                 self.config.rules_avoid.as_deref(),
                 self.config.rules_focus.as_deref(),
             );
-            let runner = crate::techniques::runner::TechniqueRunner::new(
+            let mut runner_builder = crate::techniques::runner::TechniqueRunner::new(
                 self.container.clone(),
                 context.clone(),
                 self.llm.clone(),
                 self.prompt_loader.clone(),
             ).with_scope(scope)
              .with_dry_run(self.config.pipeline_testing)
-             .with_audit(self.audit.clone());
+             .with_audit(self.audit.clone())
+             .with_cancel_token(self.cancel_token.clone());
 
-            // Run technique groups
+            if let Some(ref tx) = self.event_tx {
+                runner_builder = runner_builder.with_event_channel(tx.clone());
+            }
+            let runner = runner_builder;
+
+            // Run technique groups — per-technique events emitted by the runner
             let layers = ["network", "ip", "tcp"];
             for layer in &layers {
+                self.check_cancelled().await?;
                 if let Some(techs) = self.technique_library.get_all_techniques_for_layer(layer) {
-                    self.emit(PipelineEvent::TechniqueRunning {
-                        technique_name: format!("{} scan", layer),
-                        layer: layer.to_string(),
-                    });
-                    let (findings, outputs) = runner.run_techniques(techs).await?;
+                    let (findings, outputs) = runner.run_techniques(techs, layer).await?;
                     context.update_from_outputs(&outputs);
-                    self.emit(PipelineEvent::TechniqueCompleted {
-                        technique_name: format!("{} scan", layer),
-                        findings_count: findings.len(),
-                    });
                     info!(layer, findings = findings.len(), "Layer scan complete");
                     self.accumulate_findings(findings).await;
                 }
@@ -346,17 +352,10 @@ impl PipelineOrchestrator {
 
             let layers2 = ["presentation", "session", "application"];
             for layer in &layers2 {
+                self.check_cancelled().await?;
                 if let Some(techs) = self.technique_library.get_all_techniques_for_layer(layer) {
-                    self.emit(PipelineEvent::TechniqueRunning {
-                        technique_name: format!("{} scan", layer),
-                        layer: layer.to_string(),
-                    });
-                    let (findings, outputs) = runner.run_techniques(techs).await?;
+                    let (findings, outputs) = runner.run_techniques(techs, layer).await?;
                     context.update_from_outputs(&outputs);
-                    self.emit(PipelineEvent::TechniqueCompleted {
-                        technique_name: format!("{} scan", layer),
-                        findings_count: findings.len(),
-                    });
                     info!(layer, findings = findings.len(), "Layer scan complete");
                     self.accumulate_findings(findings).await;
                 }
@@ -364,15 +363,7 @@ impl PipelineOrchestrator {
 
             if context.has_open_ports() {
                 if let Some(techs) = self.technique_library.get_all_techniques_for_layer("exploitation") {
-                    self.emit(PipelineEvent::TechniqueRunning {
-                        technique_name: "exploitation techniques".to_string(),
-                        layer: "exploitation".to_string(),
-                    });
-                    let (findings, _) = runner.run_techniques(techs).await?;
-                    self.emit(PipelineEvent::TechniqueCompleted {
-                        technique_name: "exploitation techniques".to_string(),
-                        findings_count: findings.len(),
-                    });
+                    let (findings, _) = runner.run_techniques(techs, "exploitation").await?;
                     info!(findings = findings.len(), "Exploitation techniques complete");
                     self.accumulate_findings(findings).await;
                 }
@@ -384,7 +375,7 @@ impl PipelineOrchestrator {
 
         // Phases 3-4: Vulnerability Analysis + Exploitation (pipelined)
         if !self.config.skip_exploit && !self.config.blackbox_only {
-            self.check_cancelled()?;
+            self.check_cancelled().await?;
             self.check_cost_budget().await?;
             info!("Phases 3-4: Vulnerability Analysis & Exploitation");
             self.set_phase(PhaseName::VulnerabilityAnalysis).await;
@@ -403,7 +394,7 @@ impl PipelineOrchestrator {
         self.write_wstg_coverage().await;
 
         // Phase 5: Reporting
-        self.check_cancelled()?;
+        self.check_cancelled().await?;
         self.check_cost_budget().await?;
         info!("Phase 5: Reporting");
         self.set_phase(PhaseName::Reporting).await;
@@ -585,9 +576,17 @@ impl PipelineOrchestrator {
         state.current_phase = Some(phase);
     }
 
-    fn check_cancelled(&self) -> Result<(), SekuraError> {
+    async fn check_cancelled(&self) -> Result<(), SekuraError> {
         if self.cancel_token.is_cancelled() {
-            Err(SekuraError::Internal("Pipeline cancelled".into()))
+            self.update_status(PipelineStatus::Failed).await;
+            self.audit.record_event(AuditEvent::ScanFailed {
+                error: "Pipeline cancelled by user".to_string(),
+            }).await;
+            self.emit(PipelineEvent::PipelineFailed {
+                error: "Pipeline cancelled by user".to_string(),
+            });
+            info!("Pipeline cancelled by user");
+            Err(SekuraError::Internal("Pipeline cancelled by user".into()))
         } else {
             Ok(())
         }
