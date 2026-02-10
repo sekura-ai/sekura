@@ -139,3 +139,77 @@ pub struct OutputConfig {
     pub directory: Option<String>,
     pub format: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_intensity_max_level_ordering() {
+        assert!(Intensity::Quick.max_level() < Intensity::Standard.max_level());
+        assert!(Intensity::Standard.max_level() < Intensity::Thorough.max_level());
+    }
+
+    #[test]
+    fn test_intensity_as_str() {
+        assert_eq!(Intensity::Quick.as_str(), "quick");
+        assert_eq!(Intensity::Standard.as_str(), "standard");
+        assert_eq!(Intensity::Thorough.as_str(), "thorough");
+    }
+
+    #[test]
+    fn test_intensity_default() {
+        assert_eq!(Intensity::default(), Intensity::Standard);
+    }
+
+    #[test]
+    fn test_login_type_deserialize() {
+        let parsed: LoginType = serde_json::from_str("\"form\"").unwrap();
+        assert!(matches!(parsed, LoginType::Form));
+    }
+
+    #[test]
+    fn test_login_type_all_variants() {
+        let _: LoginType = serde_json::from_str("\"sso\"").unwrap();
+        let _: LoginType = serde_json::from_str("\"api\"").unwrap();
+        let _: LoginType = serde_json::from_str("\"basic\"").unwrap();
+    }
+
+    #[test]
+    fn test_rule_type_deserialization() {
+        let parsed: RuleType = serde_json::from_str("\"path\"").unwrap();
+        assert_eq!(parsed, RuleType::Path);
+    }
+
+    #[test]
+    fn test_sekura_config_default() {
+        let config = SekuraConfig::default();
+        assert!(config.authentication.is_none());
+        assert!(config.rules.is_none());
+        assert!(config.scan.is_none());
+    }
+
+    #[test]
+    fn test_container_config_defaults() {
+        let config = ContainerConfig::default();
+        assert_eq!(config.image, Some("sekura-kali:latest".to_string()));
+        assert_eq!(config.name, Some("sekura-kali".to_string()));
+        assert_eq!(config.network_mode, Some("host".to_string()));
+        assert!(config.capabilities.as_ref().unwrap().contains(&"NET_RAW".to_string()));
+    }
+
+    #[test]
+    fn test_intensity_serialization_roundtrip() {
+        let json = serde_json::to_string(&Intensity::Thorough).unwrap();
+        assert_eq!(json, "\"thorough\"");
+        let parsed: Intensity = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, Intensity::Thorough);
+    }
+
+    #[test]
+    fn test_intensity_display() {
+        assert_eq!(format!("{}", Intensity::Quick), "quick");
+        assert_eq!(format!("{}", Intensity::Standard), "standard");
+        assert_eq!(format!("{}", Intensity::Thorough), "thorough");
+    }
+}

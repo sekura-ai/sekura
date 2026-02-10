@@ -11,11 +11,11 @@ use tokio_util::sync::CancellationToken;
 use crate::config::{ContainerConfig, Intensity};
 use crate::container::ContainerManager;
 use crate::errors::SekuraError;
-use crate::models::finding::Severity;
+use crate::models::finding::{Finding, Severity};
 use crate::pipeline::orchestrator::PipelineOrchestrator;
 use crate::pipeline::state::{PipelineConfig, PipelineState, PipelineStatus};
 use crate::repl::banner;
-use crate::repl::commands::{self, ContainerAction, SlashCommand};
+use crate::repl::commands::{self, ContainerAction, ReportAction, SlashCommand};
 use crate::repl::completer::ReplHelper;
 use crate::repl::events::PipelineEvent;
 use crate::repl::progress::ScanProgress;
@@ -454,39 +454,184 @@ impl ReplSession {
                 }
             }
 
-            SlashCommand::Report { scan_id } => {
+            SlashCommand::Report { scan_id, action } => {
                 let s = state.lock().await;
                 let output_dir = PathBuf::from(
                     s.defaults.get("output").map(|s| s.as_str()).unwrap_or("./results"),
                 );
-                let target_id = scan_id
-                    .or_else(|| s.history.last().map(|(id, ..)| id.clone()))
-                    .or_else(|| find_most_recent_scan(&output_dir));
-                if let Some(id) = target_id {
-                    let report_path = output_dir
-                        .join(&id)
-                        .join("deliverables")
-                        .join("comprehensive_security_assessment_report.md");
+                drop(s); // release lock before I/O
 
-                    if report_path.exists() {
-                        match tokio::fs::read_to_string(&report_path).await {
-                            Ok(content) => {
-                                println!("\n{}\n", style(format!("Report for {}:", id)).white().bold());
-                                println!("{}", content);
-                                println!();
-                            }
-                            Err(e) => {
-                                println!("{}", renderer::render_error(&format!("Failed to read report: {}", e)));
-                            }
-                        }
+                // Resolve which scan to operate on
+                let id = if let Some(explicit) = scan_id {
+                    // Explicit scan_id provided via positional arg or --scan
+                    explicit
+                } else if matches!(action, ReportAction::Summary) {
+                    // No scan_id + Summary → show picker of all scans
+                    let scans = list_all_scans(&output_dir).await;
+                    if scans.is_empty() {
+                        println!("{}", renderer::render_info(
+                            "No scan results found. Run a scan first.",
+                        ));
+                        return false;
+                    }
+                    if scans.len() == 1 {
+                        // Only one scan — skip the picker
+                        scans[0].scan_id.clone()
                     } else {
-                        println!(
-                            "{}",
-                            renderer::render_error(&format!("Report not found at: {}", report_path.display()))
-                        );
+                        // Print the picker, read input
+                        print!("{}", renderer::render_scan_picker(&scans));
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+
+                        let term = console::Term::stdout();
+                        let choice = term.read_line().unwrap_or_default().trim().to_string();
+
+                        if choice.is_empty() {
+                            // Default: most recent (first in list, sorted newest-first)
+                            scans[0].scan_id.clone()
+                        } else if let Ok(n) = choice.parse::<usize>() {
+                            if n >= 1 && n <= scans.len() {
+                                scans[n - 1].scan_id.clone()
+                            } else {
+                                println!("{}", renderer::render_error(&format!(
+                                    "Invalid choice. Enter 1-{}.", scans.len()
+                                )));
+                                return false;
+                            }
+                        } else {
+                            // Treat as scan_id directly
+                            choice
+                        }
                     }
                 } else {
-                    println!("{}", renderer::render_info("No scans found. Run a scan first or specify a scan ID: /report <scan_id>"));
+                    // Non-Summary sub-command with no scan_id → auto-pick most recent
+                    let s = state.lock().await;
+                    let id = s.history.last().map(|(id, ..)| id.clone())
+                        .or_else(|| find_most_recent_scan(&output_dir));
+                    drop(s);
+                    match id {
+                        Some(id) => id,
+                        None => {
+                            println!("{}", renderer::render_info(
+                                "No scans found. Run /report to list available scans.",
+                            ));
+                            return false;
+                        }
+                    }
+                };
+
+                let deliverables_dir = output_dir.join(&id).join("deliverables");
+                if !deliverables_dir.is_dir() {
+                    println!("{}", renderer::render_error(&format!("Deliverables not found for scan: {}", id)));
+                    return false;
+                }
+
+                // Load findings.json (used by most sub-commands)
+                let findings = load_findings(&deliverables_dir).await;
+
+                match action {
+                    ReportAction::Summary => {
+                        // Load session metrics for target/duration/cost
+                        let (target, duration_ms, cost_usd) = load_session_metrics(&deliverables_dir).await;
+
+                        // Build deliverable availability list
+                        let deliverables = build_deliverable_list(&deliverables_dir, &findings);
+
+                        println!("{}", renderer::render_report_summary(
+                            &id,
+                            &target,
+                            duration_ms,
+                            cost_usd,
+                            &findings,
+                            &deliverables,
+                        ));
+                    }
+                    ReportAction::Findings { severity_filter } => {
+                        println!("{}", renderer::render_report_findings_table(
+                            &findings,
+                            severity_filter.as_deref(),
+                        ));
+                    }
+                    ReportAction::Finding(n) => {
+                        if findings.is_empty() {
+                            println!("{}", renderer::render_info("No findings loaded."));
+                        } else if n > findings.len() {
+                            println!("{}", renderer::render_error(&format!(
+                                "Finding #{} does not exist. There are {} findings (1-{}).",
+                                n, findings.len(), findings.len()
+                            )));
+                        } else {
+                            println!("{}", renderer::render_report_finding_detail(n, &findings[n - 1]));
+                        }
+                    }
+                    ReportAction::Executive => {
+                        if findings.is_empty() {
+                            println!("{}", renderer::render_info("No findings loaded."));
+                        } else {
+                            let summary = crate::reporting::formatter::format_executive_summary(&findings);
+                            println!("\n{}", summary);
+                        }
+                    }
+                    ReportAction::Evidence(category) => {
+                        let filename = format!("{}_exploitation_evidence.md", category);
+                        let path = deliverables_dir.join(&filename);
+                        if path.exists() {
+                            match tokio::fs::read_to_string(&path).await {
+                                Ok(content) => {
+                                    println!("\n{}\n", style(format!("Evidence: {}", category)).white().bold());
+                                    println!("{}", content);
+                                }
+                                Err(e) => {
+                                    println!("{}", renderer::render_error(&format!("Failed to read {}: {}", filename, e)));
+                                }
+                            }
+                        } else {
+                            println!("{}", renderer::render_info(&format!(
+                                "No {} evidence file found. The exploitation phase may not have run for this category.", category
+                            )));
+                        }
+                    }
+                    ReportAction::Full => {
+                        let report_path = deliverables_dir.join("comprehensive_security_assessment_report.md");
+                        if report_path.exists() {
+                            match tokio::fs::read_to_string(&report_path).await {
+                                Ok(content) => {
+                                    println!("\n{}\n", style(format!("Report for {}:", id)).white().bold());
+                                    println!("{}", content);
+                                }
+                                Err(e) => {
+                                    println!("{}", renderer::render_error(&format!("Failed to read report: {}", e)));
+                                }
+                            }
+                        } else {
+                            println!("{}", renderer::render_error("Full report not found. The reporting phase may not have completed."));
+                        }
+                    }
+                    ReportAction::Html => {
+                        let html_path = deliverables_dir.join("report.html");
+                        if html_path.exists() {
+                            let path_str = html_path.display().to_string();
+                            #[cfg(target_os = "macos")]
+                            let cmd = "open";
+                            #[cfg(target_os = "linux")]
+                            let cmd = "xdg-open";
+                            #[cfg(target_os = "windows")]
+                            let cmd = "start";
+                            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+                            let cmd = "open";
+
+                            match std::process::Command::new(cmd).arg(&path_str).spawn() {
+                                Ok(_) => {
+                                    println!("{}", renderer::render_success(&format!("Opened {} in browser", path_str)));
+                                }
+                                Err(e) => {
+                                    println!("{}", renderer::render_error(&format!("Failed to open browser: {}", e)));
+                                    println!("{}", renderer::render_info(&format!("File: {}", path_str)));
+                                }
+                            }
+                        } else {
+                            println!("{}", renderer::render_error("HTML report not found. The reporting phase may not have completed."));
+                        }
+                    }
                 }
             }
 
@@ -1114,4 +1259,142 @@ fn load_scan_file(path: &str) -> Result<ScanFileConfig, String> {
         .map_err(|e| format!("Cannot read file: {}", e))?;
     serde_json::from_str(&content)
         .map_err(|e| format!("Invalid JSON: {}", e))
+}
+
+/// Discover all scan results in the output directory, sorted newest-first.
+async fn list_all_scans(output_dir: &std::path::Path) -> Vec<renderer::ScanEntry> {
+    let entries = match std::fs::read_dir(output_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut scans: Vec<(renderer::ScanEntry, std::time::SystemTime)> = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let deliverables = path.join("deliverables");
+        if !deliverables.is_dir() {
+            continue;
+        }
+
+        let scan_id = entry.file_name().to_string_lossy().to_string();
+        let modified = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::UNIX_EPOCH);
+
+        // Load lightweight metadata
+        let (target, duration_ms, cost_usd) = load_session_metrics(&deliverables).await;
+
+        let findings_count = match tokio::fs::read_to_string(deliverables.join("findings.json")).await {
+            Ok(json) => serde_json::from_str::<Vec<serde_json::Value>>(&json)
+                .map(|v| v.len())
+                .unwrap_or(0),
+            Err(_) => 0,
+        };
+
+        scans.push((
+            renderer::ScanEntry {
+                scan_id,
+                target,
+                findings_count,
+                cost_usd,
+                duration_ms,
+            },
+            modified,
+        ));
+    }
+
+    // Sort newest first
+    scans.sort_by(|a, b| b.1.cmp(&a.1));
+    scans.into_iter().map(|(entry, _)| entry).collect()
+}
+
+/// Load findings.json from the deliverables directory.
+async fn load_findings(deliverables_dir: &std::path::Path) -> Vec<Finding> {
+    let path = deliverables_dir.join("findings.json");
+    if !path.exists() {
+        return Vec::new();
+    }
+    match tokio::fs::read_to_string(&path).await {
+        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Load session_metrics.json and extract target, duration, cost.
+async fn load_session_metrics(
+    deliverables_dir: &std::path::Path,
+) -> (String, Option<u64>, Option<f64>) {
+    let path = deliverables_dir.join("session_metrics.json");
+    if !path.exists() {
+        return ("unknown".into(), None, None);
+    }
+    match tokio::fs::read_to_string(&path).await {
+        Ok(json) => {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
+                let target = v["target"].as_str().unwrap_or("unknown").to_string();
+                let duration_ms = v["total_duration_ms"].as_u64();
+                let cost_usd = v["total_cost_usd"].as_f64();
+                (target, duration_ms, cost_usd)
+            } else {
+                ("unknown".into(), None, None)
+            }
+        }
+        Err(_) => ("unknown".into(), None, None),
+    }
+}
+
+/// Build a list of deliverables and whether they exist.
+fn build_deliverable_list(
+    deliverables_dir: &std::path::Path,
+    findings: &[Finding],
+) -> Vec<renderer::DeliverableInfo> {
+    let mut list = Vec::new();
+
+    list.push(renderer::DeliverableInfo {
+        label: "findings",
+        description: format!("{} findings loaded", findings.len()),
+        exists: deliverables_dir.join("findings.json").exists(),
+    });
+    list.push(renderer::DeliverableInfo {
+        label: "executive",
+        description: "Executive summary".into(),
+        exists: !findings.is_empty(),
+    });
+
+    let evidence_categories = [
+        ("evidence/injection", "injection", "Injection exploitation evidence"),
+        ("evidence/xss", "xss", "XSS exploitation evidence"),
+        ("evidence/auth", "auth", "Auth exploitation evidence"),
+        ("evidence/ssrf", "ssrf", "SSRF exploitation evidence"),
+        ("evidence/authz", "authz", "AuthZ exploitation evidence"),
+    ];
+    for (label, cat, desc) in &evidence_categories {
+        let filename = format!("{}_exploitation_evidence.md", cat);
+        list.push(renderer::DeliverableInfo {
+            label,
+            description: desc.to_string(),
+            exists: deliverables_dir.join(&filename).exists(),
+        });
+    }
+
+    list.push(renderer::DeliverableInfo {
+        label: "full",
+        description: "Comprehensive report (markdown)".into(),
+        exists: deliverables_dir
+            .join("comprehensive_security_assessment_report.md")
+            .exists(),
+    });
+    list.push(renderer::DeliverableInfo {
+        label: "html",
+        description: "HTML report".into(),
+        exists: deliverables_dir.join("report.html").exists(),
+    });
+
+    list
 }

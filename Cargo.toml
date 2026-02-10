@@ -3,7 +3,11 @@ name = "sekura"
 version = "1.0.0"
 edition = "2021"
 description = "Autonomous AI Penetration Testing Agent"
-license = "MIT"
+license = "AGPL-3.0-or-later"
+
+[lib]
+name = "sekura"
+path = "src/lib.rs"
 
 [[bin]]
 name = "sekura"
@@ -109,3 +113,5 @@ opt-level = 3
 
 [dev-dependencies]
 tempfile = "3.25.0"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

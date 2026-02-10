@@ -62,6 +62,7 @@ impl Completer for ReplHelper {
                     "--skip-whitebox", "--skip-blackbox", "--skip-exploit",
                 ],
                 "/findings" => &["--severity"],
+                "/report" => &["findings", "finding", "executive", "evidence", "full", "html", "--scan"],
                 "/serve" => &["--port"],
                 "/container" => &["status", "start", "stop", "rebuild"],
                 _ => &[],

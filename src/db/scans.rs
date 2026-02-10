@@ -119,3 +119,108 @@ impl Database {
         Ok(affected > 0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_db_create_and_get_scan() {
+        let db = Database::in_memory().unwrap();
+        db.create_scan("scan-1", "http://example.com", None, "standard", "anthropic", Some("claude-3"), None, None).unwrap();
+
+        let scan = db.get_scan("scan-1").unwrap().unwrap();
+        assert_eq!(scan["id"], "scan-1");
+        assert_eq!(scan["target"], "http://example.com");
+        assert_eq!(scan["status"], "queued");
+        assert_eq!(scan["intensity"], "standard");
+        assert_eq!(scan["model"], "claude-3");
+    }
+
+    #[test]
+    fn test_db_get_nonexistent_scan() {
+        let db = Database::in_memory().unwrap();
+        let result = db.get_scan("nonexistent").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_db_list_scans_pagination() {
+        let db = Database::in_memory().unwrap();
+        for i in 0..5 {
+            db.create_scan(&format!("scan-{}", i), "http://example.com", None, "standard", "anthropic", None, None, None).unwrap();
+        }
+
+        let all = db.list_scans(10, 0).unwrap();
+        assert_eq!(all.len(), 5);
+
+        let page = db.list_scans(2, 0).unwrap();
+        assert_eq!(page.len(), 2);
+
+        let page2 = db.list_scans(2, 2).unwrap();
+        assert_eq!(page2.len(), 2);
+
+        let page3 = db.list_scans(10, 4).unwrap();
+        assert_eq!(page3.len(), 1);
+    }
+
+    #[test]
+    fn test_db_delete_scan() {
+        let db = Database::in_memory().unwrap();
+        db.create_scan("scan-del", "http://example.com", None, "standard", "anthropic", None, None, None).unwrap();
+        assert!(db.get_scan("scan-del").unwrap().is_some());
+
+        let deleted = db.delete_scan("scan-del").unwrap();
+        assert!(deleted);
+        assert!(db.get_scan("scan-del").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_db_delete_nonexistent() {
+        let db = Database::in_memory().unwrap();
+        let deleted = db.delete_scan("no-such-scan").unwrap();
+        assert!(!deleted);
+    }
+
+    #[test]
+    fn test_db_update_scan_status_running() {
+        let db = Database::in_memory().unwrap();
+        db.create_scan("scan-run", "http://example.com", None, "standard", "anthropic", None, None, None).unwrap();
+
+        db.update_scan_status("scan-run", "running").unwrap();
+        let scan = db.get_scan("scan-run").unwrap().unwrap();
+        assert_eq!(scan["status"], "running");
+        assert!(scan["started_at"].is_string());
+    }
+
+    #[test]
+    fn test_db_update_scan_status_completed() {
+        let db = Database::in_memory().unwrap();
+        db.create_scan("scan-comp", "http://example.com", None, "standard", "anthropic", None, None, None).unwrap();
+
+        db.update_scan_status("scan-comp", "completed").unwrap();
+        let scan = db.get_scan("scan-comp").unwrap().unwrap();
+        assert_eq!(scan["status"], "completed");
+        assert!(scan["completed_at"].is_string());
+    }
+
+    #[test]
+    fn test_db_update_scan_status_failed() {
+        let db = Database::in_memory().unwrap();
+        db.create_scan("scan-fail", "http://example.com", None, "standard", "anthropic", None, None, None).unwrap();
+
+        db.update_scan_status("scan-fail", "failed").unwrap();
+        let scan = db.get_scan("scan-fail").unwrap().unwrap();
+        assert_eq!(scan["status"], "failed");
+    }
+
+    #[test]
+    fn test_db_create_scan_with_repo() {
+        let db = Database::in_memory().unwrap();
+        db.create_scan("scan-repo", "http://example.com", Some("/tmp/repo"), "thorough", "openai", None, None, None).unwrap();
+
+        let scan = db.get_scan("scan-repo").unwrap().unwrap();
+        assert_eq!(scan["repo_path"], "/tmp/repo");
+        assert_eq!(scan["intensity"], "thorough");
+    }
+}

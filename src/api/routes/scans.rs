@@ -95,9 +95,33 @@ pub async fn get_findings(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // First check the scan exists
     match state.db.get_scan(&id) {
-        Ok(Some(_)) => Ok(Json(json!({"findings": [], "total": 0}))),
-        Ok(None) => Err((StatusCode::NOT_FOUND, Json(json!({"error": "Scan not found"})))),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()})))),
+        Ok(None) => return Err((StatusCode::NOT_FOUND, Json(json!({"error": "Scan not found"})))),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()})))),
+        Ok(Some(_)) => {}
+    }
+
+    // Try to read findings from disk (consistent with REPL /report findings)
+    let findings_path = std::path::PathBuf::from("./results")
+        .join(&id)
+        .join("deliverables")
+        .join("findings.json");
+
+    if findings_path.exists() {
+        match tokio::fs::read_to_string(&findings_path).await {
+            Ok(content) => {
+                match serde_json::from_str::<Vec<Value>>(&content) {
+                    Ok(findings) => {
+                        let total = findings.len();
+                        Ok(Json(json!({"findings": findings, "total": total})))
+                    }
+                    Err(_) => Ok(Json(json!({"findings": [], "total": 0}))),
+                }
+            }
+            Err(_) => Ok(Json(json!({"findings": [], "total": 0}))),
+        }
+    } else {
+        Ok(Json(json!({"findings": [], "total": 0})))
     }
 }

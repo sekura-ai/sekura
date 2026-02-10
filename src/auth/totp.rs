@@ -38,3 +38,45 @@ pub fn generate_totp(secret: &str) -> Result<TotpResult, SekuraError> {
         seconds_remaining,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_totp_generates_6_digits() {
+        // Use a valid base32 secret
+        let result = generate_totp("JBSWY3DPEHPK3PXP");
+        assert!(result.is_ok());
+        let totp = result.unwrap();
+        assert_eq!(totp.code.len(), 6);
+        assert!(totp.code.chars().all(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn test_totp_seconds_remaining() {
+        let result = generate_totp("JBSWY3DPEHPK3PXP").unwrap();
+        assert!(result.seconds_remaining > 0);
+        assert!(result.seconds_remaining <= 30);
+    }
+
+    #[test]
+    fn test_totp_cleans_secret() {
+        // Secret with spaces and hyphens should be cleaned
+        let result = generate_totp("JBSW Y3DP-EHPK-3PXP");
+        assert!(result.is_ok());
+        let totp = result.unwrap();
+        assert_eq!(totp.code.len(), 6);
+    }
+
+    #[test]
+    fn test_totp_timestamp_is_recent() {
+        let result = generate_totp("JBSWY3DPEHPK3PXP").unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // Timestamp should be within 1 second of now
+        assert!((result.timestamp as i64 - now as i64).abs() <= 1);
+    }
+}

@@ -11,6 +11,27 @@ const SEP_CHAR: char = '\u{2026}'; // …
 
 const TAGLINE: &str = "Autonomous AI Penetration Testing Agent";
 
+/// Hacker-in-hoodie ASCII art (each line is 20 chars wide).
+const HACKER_ART: &[&str] = &[
+    "       \u{2584}\u{2588}\u{2588}\u{2588}\u{2588}\u{2584}       ",
+    "     \u{2584}\u{2588}\u{2588}\u{2580}\u{2580}\u{2580}\u{2580}\u{2588}\u{2588}\u{2584}     ",
+    "    \u{2588}\u{2588}\u{2580}      \u{2580}\u{2588}\u{2588}    ",
+    "    \u{2588}\u{2588}  \u{25a0}  \u{25a0}  \u{2588}\u{2588}    ",
+    "    \u{2588}\u{2588}        \u{2588}\u{2588}    ",
+    "     \u{2588}\u{2588}\u{2584}\u{2584}\u{2584}\u{2584}\u{2584}\u{2584}\u{2588}\u{2588}     ",
+    "      \u{2580}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2580}      ",
+    "     \u{2590}\u{2588} \u{2588}\u{2588}\u{2588}\u{2588} \u{2588}\u{258c}     ",
+];
+const HACKER_W: usize = 20;
+const HACKER_EYE_LINE: usize = 3;
+
+/// Mini hacker logo for inline display (each line is 6 chars wide).
+const MINI_LOGO: &[&str] = &[
+    " \u{2584}\u{2588}\u{2588}\u{2584} ",
+    "\u{2588}\u{2588}\u{25a0}\u{25a0}\u{2588}\u{2588}",
+    " \u{2580}\u{2588}\u{2588}\u{2580} ",
+];
+
 /// Show the full-screen splash banner.
 /// Waits for Enter, then clears and returns.
 pub fn show_splash() {
@@ -40,6 +61,17 @@ pub fn show_splash() {
     ]);
     let gradient = Gradient::new(palette.colors().to_vec(), GradientDirection::Diagonal);
 
+    // Determine if terminal is wide enough for side-by-side logo + banner
+    let logo_gap = 3;
+    let min_banner_w = 50;
+    let show_logo = term_w >= HACKER_W + logo_gap + min_banner_w + 4;
+
+    let banner_field_w = if show_logo {
+        term_w.saturating_sub(HACKER_W + logo_gap + 4).min(90)
+    } else {
+        term_w
+    };
+
     let banner_text = match Banner::new("SEKURA") {
         Ok(b) => b
             .gradient(gradient)
@@ -48,22 +80,51 @@ pub fn show_splash() {
             .trim_vertical(true)
             .edge_shade(0.35, '\u{2591}') // ░
             .color_mode(ColorMode::TrueColor)
-            .width(term_w)
+            .width(banner_field_w)
             .render(),
         Err(_) => {
-            // Fallback if FIGlet font fails
-            let p = center(6);
             format!(
-                "{}{}\n",
-                p,
+                "{}\n",
                 style("SEKURA").color256(BRAND).bold()
             )
         }
     };
 
-    // ── Banner ──
+    // ── Banner + Logo ──
     println!();
-    print!("{}", banner_text);
+    if show_logo {
+        let banner_lines: Vec<&str> = banner_text.lines().collect();
+        let logo_lines = styled_hacker_art();
+        let max_h = banner_lines.len().max(logo_lines.len());
+        let combined_w = HACKER_W + logo_gap + banner_field_w;
+        let left_pad = if term_w > combined_w + 2 {
+            (term_w - combined_w) / 2
+        } else {
+            1
+        };
+        let pad_str = " ".repeat(left_pad);
+        let gap_str = " ".repeat(logo_gap);
+        let empty_logo = " ".repeat(HACKER_W);
+
+        // Vertically center the logo against the banner
+        let logo_offset = if max_h > logo_lines.len() {
+            (max_h - logo_lines.len()) / 2
+        } else {
+            0
+        };
+
+        for i in 0..max_h {
+            let logo_idx = i.checked_sub(logo_offset);
+            let logo = match logo_idx {
+                Some(idx) if idx < logo_lines.len() => &logo_lines[idx],
+                _ => &empty_logo,
+            };
+            let banner = banner_lines.get(i).copied().unwrap_or("");
+            println!("{}{}{}{}", pad_str, logo, gap_str, banner);
+        }
+    } else {
+        print!("{}", banner_text);
+    }
 
     // ── Version ──
     {
@@ -154,20 +215,70 @@ pub fn show_splash() {
         }
     }
 
-    // Clear and show brief post-splash header
+    // Clear and show brief post-splash header with mini logo
     let _ = term.clear_screen();
+    let mini = styled_mini_logo();
+    println!("  {}", mini[0]);
     println!(
-        "  {} {}  {}",
+        "  {}  {} {}  {}",
+        mini[1],
         style("Sekura").color256(BRAND).bold(),
         style(format!("v{}", version)).dim(),
         style("\u{2714} ready").green().dim(),
     );
     println!(
-        "  {} {}",
+        "  {}  {} {}",
+        mini[2],
         style("Type").dim(),
         style("/help").white().bold(),
     );
     println!();
+}
+
+/// Render the hacker art lines with brand colors and green eyes.
+fn styled_hacker_art() -> Vec<String> {
+    HACKER_ART
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            if i == HACKER_EYE_LINE {
+                let parts: Vec<&str> = line.split('\u{25a0}').collect();
+                format!(
+                    "{}{}{}{}{}",
+                    style(parts[0]).color256(BRAND_DIM),
+                    style("\u{25a0}").green().bold(),
+                    style(parts[1]).color256(BRAND_DIM),
+                    style("\u{25a0}").green().bold(),
+                    style(parts[2]).color256(BRAND_DIM),
+                )
+            } else if i <= 6 {
+                format!("{}", style(line).color256(BRAND_DIM))
+            } else {
+                format!("{}", style(line).color256(BRAND))
+            }
+        })
+        .collect()
+}
+
+/// Render the mini hacker logo with brand colors and green eyes.
+fn styled_mini_logo() -> Vec<String> {
+    MINI_LOGO
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            if i == 1 {
+                let parts: Vec<&str> = line.splitn(3, "\u{25a0}\u{25a0}").collect();
+                format!(
+                    "{}{}{}",
+                    style(parts[0]).color256(BRAND),
+                    style("\u{25a0}\u{25a0}").green().bold(),
+                    style(parts.get(1).unwrap_or(&"")).color256(BRAND),
+                )
+            } else {
+                format!("{}", style(line).color256(BRAND))
+            }
+        })
+        .collect()
 }
 
 /// Print the "AUTHORIZED USE ONLY" notice inside a box-drawn border.

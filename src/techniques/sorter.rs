@@ -66,3 +66,76 @@ pub fn topological_sort<'a>(
 
     Ok(result.iter().map(|&i| &techniques[i]).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_technique(name: &str, depends_on: Option<&str>) -> TechniqueDefinition {
+        TechniqueDefinition {
+            name: name.to_string(),
+            tool: "nmap".to_string(),
+            command: "nmap {target}".to_string(),
+            description: "test".to_string(),
+            intensity: "standard".to_string(),
+            timeout: 300,
+            parse_hint: None,
+            depends_on: depends_on.map(|s| s.to_string()),
+            depends_on_ports: None,
+        }
+    }
+
+    #[test]
+    fn test_topological_sort_no_deps() {
+        let techniques = vec![
+            make_technique("a", None),
+            make_technique("b", None),
+            make_technique("c", None),
+        ];
+        let sorted = topological_sort(&techniques).unwrap();
+        assert_eq!(sorted.len(), 3);
+        let names: Vec<&str> = sorted.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_topological_sort_with_deps() {
+        let techniques = vec![
+            make_technique("b", Some("a")),
+            make_technique("a", None),
+        ];
+        let sorted = topological_sort(&techniques).unwrap();
+        let names: Vec<&str> = sorted.iter().map(|t| t.name.as_str()).collect();
+        // "a" must come before "b"
+        let a_pos = names.iter().position(|&n| n == "a").unwrap();
+        let b_pos = names.iter().position(|&n| n == "b").unwrap();
+        assert!(a_pos < b_pos);
+    }
+
+    #[test]
+    fn test_topological_sort_missing_dep() {
+        // "b" depends on "nonexistent" which is not in the list -- should still succeed
+        let techniques = vec![
+            make_technique("a", None),
+            make_technique("b", Some("nonexistent")),
+        ];
+        let sorted = topological_sort(&techniques).unwrap();
+        assert_eq!(sorted.len(), 2);
+    }
+
+    #[test]
+    fn test_topological_sort_chain() {
+        let techniques = vec![
+            make_technique("c", Some("b")),
+            make_technique("b", Some("a")),
+            make_technique("a", None),
+        ];
+        let sorted = topological_sort(&techniques).unwrap();
+        let names: Vec<&str> = sorted.iter().map(|t| t.name.as_str()).collect();
+        let a_pos = names.iter().position(|&n| n == "a").unwrap();
+        let b_pos = names.iter().position(|&n| n == "b").unwrap();
+        let c_pos = names.iter().position(|&n| n == "c").unwrap();
+        assert!(a_pos < b_pos);
+        assert!(b_pos < c_pos);
+    }
+}

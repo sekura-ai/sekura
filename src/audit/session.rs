@@ -304,3 +304,94 @@ fn md5_hash(input: &str) -> u64 {
     input.hash(&mut hasher);
     hasher.finish()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_audit_session_creates_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = AuditSession::initialize(dir.path(), "test-scan-1").await.unwrap();
+
+        let base = dir.path().join("test-scan-1");
+        assert!(base.join("agents").exists());
+        assert!(base.join("prompts").exists());
+        assert!(base.join("audit_events.jsonl").exists());
+        assert_eq!(session.scan_id(), "test-scan-1");
+    }
+
+    #[tokio::test]
+    async fn test_audit_record_event_appends_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = AuditSession::initialize(dir.path(), "test-scan-2").await.unwrap();
+
+        session.record_event(AuditEvent::Warning {
+            message: "test warning 1".to_string(),
+        }).await;
+
+        session.record_event(AuditEvent::Warning {
+            message: "test warning 2".to_string(),
+        }).await;
+
+        let content = tokio::fs::read_to_string(
+            dir.path().join("test-scan-2").join("audit_events.jsonl")
+        ).await.unwrap();
+
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+
+        // Each line should be valid JSON
+        for line in &lines {
+            let _: serde_json::Value = serde_json::from_str(line).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_audit_event_has_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = AuditSession::initialize(dir.path(), "test-scan-3").await.unwrap();
+
+        session.record_event(AuditEvent::PhaseStarted {
+            phase: "recon".to_string(),
+        }).await;
+
+        let content = tokio::fs::read_to_string(
+            dir.path().join("test-scan-3").join("audit_events.jsonl")
+        ).await.unwrap();
+
+        let event: serde_json::Value = serde_json::from_str(content.lines().next().unwrap()).unwrap();
+        assert!(event["timestamp"].is_string());
+        assert_eq!(event["scan_id"], "test-scan-3");
+    }
+
+    #[tokio::test]
+    async fn test_audit_record_scan_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = AuditSession::initialize(dir.path(), "test-scan-4").await.unwrap();
+
+        session.record_scan_started("http://example.com", "standard", "anthropic").await;
+
+        let content = tokio::fs::read_to_string(
+            dir.path().join("test-scan-4").join("audit_events.jsonl")
+        ).await.unwrap();
+
+        let event: serde_json::Value = serde_json::from_str(content.lines().next().unwrap()).unwrap();
+        assert_eq!(event["event"]["event_type"], "scan_started");
+        assert_eq!(event["event"]["target"], "http://example.com");
+    }
+
+    #[tokio::test]
+    async fn test_audit_cost_tracking() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = AuditSession::initialize(dir.path(), "test-scan-5").await.unwrap();
+
+        assert_eq!(session.cumulative_cost().await, 0.0);
+
+        session.record_cost("agent-1", 0.05).await;
+        assert!((session.cumulative_cost().await - 0.05).abs() < f64::EPSILON);
+
+        session.record_cost("agent-2", 0.03).await;
+        assert!((session.cumulative_cost().await - 0.08).abs() < f64::EPSILON);
+    }
+}
