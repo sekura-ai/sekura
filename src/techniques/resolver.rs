@@ -43,3 +43,81 @@ pub fn has_unresolved(command: &str) -> bool {
     let re = regex::Regex::new(r"\{[a-z_]+\}").unwrap();
     re.is_match(command)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Intensity;
+
+    fn make_context() -> ScanContext {
+        ScanContext {
+            target: "192.168.1.1".to_string(),
+            target_url: Some("http://192.168.1.1:8080".to_string()),
+            open_ports: vec![22, 80, 443, 8080],
+            web_port: Some(8080),
+            intensity: Intensity::Standard,
+            cookie_string: Some("session=abc123".to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_resolve_target() {
+        let ctx = make_context();
+        let cmd = resolve_command("nmap -sV {target}", &ctx);
+        assert_eq!(cmd, "nmap -sV 192.168.1.1");
+    }
+
+    #[test]
+    fn test_resolve_target_url() {
+        let ctx = make_context();
+        let cmd = resolve_command("nikto -h {target_url}", &ctx);
+        assert_eq!(cmd, "nikto -h http://192.168.1.1:8080");
+    }
+
+    #[test]
+    fn test_resolve_open_ports() {
+        let ctx = make_context();
+        let cmd = resolve_command("nmap -p {open_ports} {target}", &ctx);
+        assert_eq!(cmd, "nmap -p 22,80,443,8080 192.168.1.1");
+    }
+
+    #[test]
+    fn test_resolve_intensity() {
+        let ctx = make_context();
+        let cmd = resolve_command("scan --intensity {intensity}", &ctx);
+        assert_eq!(cmd, "scan --intensity standard");
+    }
+
+    #[test]
+    fn test_resolve_cookie() {
+        let ctx = make_context();
+        let cmd = resolve_command("curl -b '{cookie_string}' {target_url}", &ctx);
+        assert_eq!(cmd, "curl -b 'session=abc123' http://192.168.1.1:8080");
+    }
+
+    #[test]
+    fn test_resolve_web_port() {
+        let ctx = make_context();
+        let cmd = resolve_command("nmap -p {web_port} {target}", &ctx);
+        assert_eq!(cmd, "nmap -p 8080 192.168.1.1");
+    }
+
+    #[test]
+    fn test_has_unresolved_true() {
+        assert!(has_unresolved("nmap {target} -p {missing_var}"));
+    }
+
+    #[test]
+    fn test_has_unresolved_false() {
+        assert!(!has_unresolved("nmap 192.168.1.1 -p 80"));
+    }
+
+    #[test]
+    fn test_resolve_extra_vars() {
+        let mut ctx = make_context();
+        ctx.extra.insert("domain".to_string(), "example.com".to_string());
+        let cmd = resolve_command("dig axfr @{target} {domain}", &ctx);
+        assert_eq!(cmd, "dig axfr @192.168.1.1 example.com");
+    }
+}

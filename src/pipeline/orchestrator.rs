@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
+use crate::audit::{AuditSession, AuditEvent};
 use crate::container::ContainerManager;
 use crate::errors::SekuraError;
 use crate::llm;
@@ -25,6 +26,7 @@ pub struct PipelineOrchestrator {
     prompt_loader: Arc<PromptLoader>,
     event_tx: Option<mpsc::UnboundedSender<PipelineEvent>>,
     findings: Arc<RwLock<Vec<Finding>>>,
+    audit: Arc<AuditSession>,
 }
 
 impl PipelineOrchestrator {
@@ -32,6 +34,11 @@ impl PipelineOrchestrator {
         // Create output directories
         tokio::fs::create_dir_all(config.deliverables_dir()).await?;
         tokio::fs::create_dir_all(config.audit_dir()).await?;
+
+        // Initialize crash-safe audit session
+        let audit = Arc::new(
+            AuditSession::initialize(&config.output_dir, &config.scan_id).await?
+        );
 
         // Initialize container manager
         let container = Arc::new(
@@ -66,6 +73,7 @@ impl PipelineOrchestrator {
             prompt_loader,
             event_tx: None,
             findings: Arc::new(RwLock::new(Vec::new())),
+            audit,
         })
     }
 
@@ -114,6 +122,11 @@ impl PipelineOrchestrator {
                 severity: f.severity.clone(),
                 category: format!("{:?}", f.category),
             });
+            self.audit.record_event(AuditEvent::FindingDiscovered {
+                title: f.title.clone(),
+                severity: format!("{:?}", f.severity),
+                category: format!("{:?}", f.category),
+            }).await;
         }
         self.findings.write().await.extend(new_findings);
     }
@@ -178,6 +191,50 @@ impl PipelineOrchestrator {
         Ok(())
     }
 
+    /// Compute WSTG coverage based on executed techniques and write to deliverables.
+    async fn write_wstg_coverage(&self) {
+        use std::collections::HashSet;
+        let techniques_dir = match std::env::current_dir() {
+            Ok(d) => d.join("techniques"),
+            Err(_) => return,
+        };
+
+        // Collect all technique names that appear in findings as executed
+        let findings = self.findings.read().await;
+        let mut executed: HashSet<String> = HashSet::new();
+        for f in findings.iter() {
+            executed.insert(f.technique.clone());
+        }
+
+        // Also add standard techniques we know ran based on the layers we iterated
+        let all_layers = self.technique_library.available_layers();
+        for layer in &all_layers {
+            if let Some(techs) = self.technique_library.get_all_techniques_for_layer(layer) {
+                for t in techs {
+                    executed.insert(t.name.clone());
+                }
+            }
+        }
+
+        match crate::techniques::wstg::compute_wstg_coverage(&techniques_dir, &executed) {
+            Ok(coverage) => {
+                let md = crate::techniques::wstg::format_wstg_coverage_markdown(&coverage);
+                let path = self.config.deliverables_dir().join("wstg_coverage_report.md");
+                if let Err(e) = tokio::fs::write(&path, &md).await {
+                    warn!(error = %e, "Failed to write WSTG coverage report");
+                } else {
+                    info!(
+                        coverage_pct = format!("{:.1}%", coverage.total_coverage_pct),
+                        "WSTG coverage report written"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to compute WSTG coverage");
+            }
+        }
+    }
+
     /// Compute a real PipelineSummary from accumulated findings and agent metrics.
     async fn compute_summary(&self) -> PipelineSummary {
         let findings = self.findings.read().await;
@@ -209,6 +266,13 @@ impl PipelineOrchestrator {
         self.update_status(PipelineStatus::Running).await;
         info!(scan_id = %self.config.scan_id, target = %self.config.target, "Pipeline started");
 
+        // Record scan start in audit trail
+        self.audit.record_scan_started(
+            &self.config.target,
+            &format!("{}", self.config.intensity),
+            &self.config.provider,
+        ).await;
+
         // Ensure Kali container is running
         self.container.ensure_running().await?;
 
@@ -217,6 +281,16 @@ impl PipelineOrchestrator {
         if let Some(cookie) = &self.config.cookie {
             context.cookie_string = Some(cookie.clone());
             context.authenticated = true;
+        }
+
+        // Pre-flight: warn if repo has uncommitted changes
+        if self.config.has_repo() {
+            if let Some(warning) = crate::git::check_repo_clean(&self.config.repo_path) {
+                warn!("{}", warning);
+                self.audit.record_event(AuditEvent::Warning {
+                    message: warning,
+                }).await;
+            }
         }
 
         // Phase 1: White-box analysis
@@ -233,16 +307,23 @@ impl PipelineOrchestrator {
         // Phase 2: Reconnaissance
         if !self.config.skip_blackbox {
             self.check_cancelled()?;
+            self.check_cost_budget().await?;
             info!("Phase 2: Reconnaissance");
             self.set_phase(PhaseName::Reconnaissance).await;
             self.emit_phase_started(&PhaseName::Reconnaissance);
 
+            let scope = crate::techniques::runner::ScopeRules::from_config(
+                self.config.rules_avoid.as_deref(),
+                self.config.rules_focus.as_deref(),
+            );
             let runner = crate::techniques::runner::TechniqueRunner::new(
                 self.container.clone(),
                 context.clone(),
                 self.llm.clone(),
                 self.prompt_loader.clone(),
-            );
+            ).with_scope(scope)
+             .with_dry_run(self.config.pipeline_testing)
+             .with_audit(self.audit.clone());
 
             // Run technique groups
             let layers = ["network", "ip", "tcp"];
@@ -304,6 +385,7 @@ impl PipelineOrchestrator {
         // Phases 3-4: Vulnerability Analysis + Exploitation (pipelined)
         if !self.config.skip_exploit && !self.config.blackbox_only {
             self.check_cancelled()?;
+            self.check_cost_budget().await?;
             info!("Phases 3-4: Vulnerability Analysis & Exploitation");
             self.set_phase(PhaseName::VulnerabilityAnalysis).await;
             self.emit_phase_started(&PhaseName::VulnerabilityAnalysis);
@@ -317,8 +399,12 @@ impl PipelineOrchestrator {
         // Write findings to deliverables before reporting phase
         self.write_findings_to_deliverables().await?;
 
+        // Compute and write WSTG coverage report
+        self.write_wstg_coverage().await;
+
         // Phase 5: Reporting
         self.check_cancelled()?;
+        self.check_cost_budget().await?;
         info!("Phase 5: Reporting");
         self.set_phase(PhaseName::Reporting).await;
         self.emit_phase_started(&PhaseName::Reporting);
@@ -338,11 +424,21 @@ impl PipelineOrchestrator {
         }
         self.update_status(PipelineStatus::Completed).await;
 
+        // Write session metrics summary to deliverables
+        self.write_session_metrics(&summary).await;
+
         self.emit(PipelineEvent::PipelineCompleted {
             total_findings: summary.total_findings,
             total_cost_usd: summary.total_cost_usd,
             total_duration_ms: summary.total_duration_ms,
         });
+
+        // Record scan completion in audit trail
+        self.audit.record_event(AuditEvent::ScanCompleted {
+            total_findings: summary.total_findings,
+            total_cost_usd: summary.total_cost_usd,
+            total_duration_ms: summary.total_duration_ms,
+        }).await;
 
         info!(scan_id = %self.config.scan_id, findings = summary.total_findings, "Pipeline completed");
         Ok(summary)
@@ -358,23 +454,113 @@ impl PipelineOrchestrator {
             VulnType::Authz,
         ];
 
+        // Build a shared ScanContext snapshot for the vuln agents
+        let context = ScanContext {
+            target: self.config.target.clone(),
+            target_url: Some(self.config.target.clone()),
+            intensity: self.config.intensity,
+            ..Default::default()
+        };
+
+        // Spawn 5 concurrent vuln → exploit pipelines
         let handles: Vec<_> = vuln_types.iter().map(|vt| {
             let vt = *vt;
-            let deliverables_dir = self.config.deliverables_dir();
+            let llm = self.llm.clone();
+            let prompt_loader = self.prompt_loader.clone();
+            let config = self.config.clone();
+            let context = context.clone();
+            let findings_acc = self.findings.clone();
+            let event_tx = self.event_tx.clone();
+
             tokio::spawn(async move {
-                let decision = crate::queue::validator::validate_queue_and_deliverable(
-                    vt, &deliverables_dir,
+                // Phase 3: Vulnerability Analysis
+                info!(vuln_type = %vt.as_str(), "Starting vuln analysis pipeline");
+                if let Some(ref tx) = event_tx {
+                    let _ = tx.send(PipelineEvent::TechniqueRunning {
+                        technique_name: format!("{} vulnerability analysis", vt.as_str()),
+                        layer: "vulnerability-analysis".to_string(),
+                    });
+                }
+
+                let vuln_result = crate::agents::vuln::run_vuln_analysis(
+                    vt, llm.clone(), prompt_loader.clone(), &config, &context,
                 ).await;
-                match decision {
-                    Ok(d) if d.should_exploit => {
-                        info!(vuln_type = %vt.as_str(), count = d.vulnerability_count, "Exploiting vulnerabilities");
+
+                let (queue, vuln_findings) = match vuln_result {
+                    Ok(result) => result,
+                    Err(e) => {
+                        warn!(vuln_type = %vt.as_str(), error = %e, "Vuln analysis failed");
+                        if let Some(ref tx) = event_tx {
+                            let _ = tx.send(PipelineEvent::TechniqueCompleted {
+                                technique_name: format!("{} vulnerability analysis", vt.as_str()),
+                                findings_count: 0,
+                            });
+                        }
+                        return;
                     }
-                    Ok(_) => {
-                        info!(vuln_type = %vt.as_str(), "No vulnerabilities to exploit");
+                };
+
+                // Accumulate vuln analysis findings
+                {
+                    let mut acc = findings_acc.write().await;
+                    for f in &vuln_findings {
+                        if let Some(ref tx) = event_tx {
+                            let _ = tx.send(PipelineEvent::FindingDiscovered {
+                                title: f.title.clone(),
+                                severity: f.severity.clone(),
+                                category: format!("{:?}", f.category),
+                            });
+                        }
+                    }
+                    acc.extend(vuln_findings);
+                }
+
+                if let Some(ref tx) = event_tx {
+                    let _ = tx.send(PipelineEvent::TechniqueCompleted {
+                        technique_name: format!("{} vulnerability analysis", vt.as_str()),
+                        findings_count: queue.vulnerabilities.len(),
+                    });
+                }
+
+                // Phase 4: Exploitation
+                info!(vuln_type = %vt.as_str(), queue_size = queue.vulnerabilities.len(), "Starting exploitation pipeline");
+                if let Some(ref tx) = event_tx {
+                    let _ = tx.send(PipelineEvent::TechniqueRunning {
+                        technique_name: format!("{} exploitation", vt.as_str()),
+                        layer: "exploitation".to_string(),
+                    });
+                }
+
+                let exploit_result = crate::agents::exploit::run_exploitation(
+                    vt, &queue, llm, prompt_loader, &config,
+                ).await;
+
+                match exploit_result {
+                    Ok(exploit_findings) => {
+                        let count = exploit_findings.len();
+                        let mut acc = findings_acc.write().await;
+                        for f in &exploit_findings {
+                            if let Some(ref tx) = event_tx {
+                                let _ = tx.send(PipelineEvent::FindingDiscovered {
+                                    title: f.title.clone(),
+                                    severity: f.severity.clone(),
+                                    category: format!("{:?}", f.category),
+                                });
+                            }
+                        }
+                        acc.extend(exploit_findings);
+                        info!(vuln_type = %vt.as_str(), findings = count, "Exploitation complete");
                     }
                     Err(e) => {
-                        warn!(vuln_type = %vt.as_str(), error = %e, "Queue validation failed");
+                        warn!(vuln_type = %vt.as_str(), error = %e, "Exploitation failed");
                     }
+                }
+
+                if let Some(ref tx) = event_tx {
+                    let _ = tx.send(PipelineEvent::TechniqueCompleted {
+                        technique_name: format!("{} exploitation", vt.as_str()),
+                        findings_count: 0,
+                    });
                 }
             })
         }).collect();
@@ -407,6 +593,66 @@ impl PipelineOrchestrator {
         }
     }
 
+    /// Check if the cost budget has been exceeded. Returns Err if over budget.
+    /// Emits a warning at 80% utilization.
+    async fn check_cost_budget(&self) -> Result<(), SekuraError> {
+        if let Some(max_cost) = self.config.max_cost {
+            let current = self.audit.cumulative_cost().await;
+            if current >= max_cost {
+                warn!(current_cost = current, max_cost = max_cost, "Cost budget exceeded — aborting pipeline");
+                self.audit.record_event(AuditEvent::Warning {
+                    message: format!("Cost budget exceeded: ${:.4} >= ${:.4}", current, max_cost),
+                }).await;
+                return Err(SekuraError::Internal(format!(
+                    "Cost budget exceeded: ${:.4} of ${:.4} limit",
+                    current, max_cost
+                )));
+            }
+            let threshold = max_cost * 0.8;
+            if current >= threshold {
+                warn!(
+                    current_cost = current,
+                    budget_pct = format!("{:.0}%", (current / max_cost) * 100.0),
+                    "Cost budget at 80%+ utilization"
+                );
+                self.emit(PipelineEvent::CostWarning {
+                    current_usd: current,
+                    max_usd: max_cost,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Write session metrics summary as JSON to deliverables.
+    async fn write_session_metrics(&self, summary: &PipelineSummary) {
+        let metrics = serde_json::json!({
+            "scan_id": self.config.scan_id,
+            "target": self.config.target,
+            "intensity": format!("{}", self.config.intensity),
+            "provider": self.config.provider,
+            "model": self.config.model,
+            "total_findings": summary.total_findings,
+            "finding_counts": summary.finding_counts,
+            "total_cost_usd": summary.total_cost_usd,
+            "total_duration_ms": summary.total_duration_ms,
+            "phases_completed": summary.phases_completed,
+            "agent_count": summary.agent_count,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        });
+        let path = self.config.deliverables_dir().join("session_metrics.json");
+        match serde_json::to_string_pretty(&metrics) {
+            Ok(json) => {
+                if let Err(e) = tokio::fs::write(&path, &json).await {
+                    warn!(error = %e, "Failed to write session metrics");
+                } else {
+                    info!(path = %path.display(), "Session metrics written");
+                }
+            }
+            Err(e) => warn!(error = %e, "Failed to serialize session metrics"),
+        }
+    }
+
     pub fn cancel(&self) {
         self.cancel_token.cancel();
     }
@@ -421,5 +667,9 @@ impl PipelineOrchestrator {
 
     pub fn findings(&self) -> Arc<RwLock<Vec<Finding>>> {
         self.findings.clone()
+    }
+
+    pub fn audit(&self) -> Arc<AuditSession> {
+        self.audit.clone()
     }
 }

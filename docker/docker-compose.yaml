@@ -1,0 +1,41 @@
+# Sekura Docker Compose orchestration.
+# Usage: docker compose -f docker/docker-compose.yaml up -d
+#
+# This sets up the Kali scanning container with health checks and
+# volume mounts for shared data between the host sekura binary
+# and the container tool environment.
+
+version: "3.9"
+
+services:
+  sekura-kali:
+    build:
+      context: .
+      dockerfile: Dockerfile.kali
+    image: sekura-kali:latest
+    container_name: sekura-kali
+    network_mode: host
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    shm_size: "2gb"
+    command: sleep infinity
+    restart: unless-stopped
+    volumes:
+      # Shared output directory for scan results
+      - sekura-output:/opt/sekura/output
+      # Shared techniques directory (read-only)
+      - ../techniques:/opt/sekura/techniques:ro
+      # Shared prompts directory (read-only)
+      - ../prompts:/opt/sekura/prompts:ro
+    healthcheck:
+      test: ["CMD", "bash", "-c", "command -v nmap && command -v nikto"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    environment:
+      - TERM=xterm-256color
+
+volumes:
+  sekura-output:

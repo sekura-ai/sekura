@@ -74,6 +74,22 @@ pub async fn assemble_final_report(
     tokio::fs::write(&output_path, &final_report).await?;
     info!(path = %output_path.display(), "Final report assembled");
 
+    // Also write HTML report
+    let findings_path = deliverables_dir.join("findings.json");
+    if findings_path.exists() {
+        let json = tokio::fs::read_to_string(&findings_path).await?;
+        if let Ok(findings) = serde_json::from_str::<Vec<Finding>>(&json) {
+            let scan_id = deliverables_dir.parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown");
+            let html = crate::reporting::formatter::format_html_report(&findings, target, scan_id);
+            let html_path = deliverables_dir.join("report.html");
+            tokio::fs::write(&html_path, &html).await?;
+            info!(path = %html_path.display(), "HTML report generated");
+        }
+    }
+
     Ok(final_report)
 }
 

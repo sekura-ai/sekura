@@ -418,27 +418,23 @@ impl ReplSession {
 
             SlashCommand::Report { scan_id } => {
                 let s = state.lock().await;
-                let target_id = scan_id.or_else(|| {
-                    s.history.last().map(|(id, ..)| id.clone())
-                });
+                let output_dir = PathBuf::from(
+                    s.defaults.get("output").map(|s| s.as_str()).unwrap_or("./results"),
+                );
+                let target_id = scan_id
+                    .or_else(|| s.history.last().map(|(id, ..)| id.clone()))
+                    .or_else(|| find_most_recent_scan(&output_dir));
                 if let Some(id) = target_id {
-                    let report_path = PathBuf::from(
-                        s.defaults.get("output").map(|s| s.as_str()).unwrap_or("./results"),
-                    )
-                    .join(&id)
-                    .join("deliverables")
-                    .join("final-report.json");
+                    let report_path = output_dir
+                        .join(&id)
+                        .join("deliverables")
+                        .join("comprehensive_security_assessment_report.md");
 
                     if report_path.exists() {
                         match tokio::fs::read_to_string(&report_path).await {
                             Ok(content) => {
                                 println!("\n{}\n", style(format!("Report for {}:", id)).white().bold());
-                                // Pretty-print JSON
-                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                                    println!("{}", serde_json::to_string_pretty(&json).unwrap_or(content));
-                                } else {
-                                    println!("{}", content);
-                                }
+                                println!("{}", content);
                                 println!();
                             }
                             Err(e) => {
@@ -452,7 +448,7 @@ impl ReplSession {
                         );
                     }
                 } else {
-                    println!("{}", renderer::render_info("No scan ID specified and no scan history."));
+                    println!("{}", renderer::render_info("No scans found. Run a scan first or specify a scan ID: /report <scan_id>"));
                 }
             }
 
@@ -497,6 +493,8 @@ impl ReplSession {
                 skip_whitebox,
                 skip_blackbox,
                 skip_exploit,
+                auth,
+                file,
             } => {
                 // Check if scan is already running
                 {
@@ -510,18 +508,46 @@ impl ReplSession {
                     }
                 }
 
+                // Load --file JSON if provided (CLI flags override file values)
+                let file_config = if let Some(ref path) = file {
+                    match load_scan_file(path) {
+                        Ok(fc) => Some(fc),
+                        Err(e) => {
+                            println!("{}", renderer::render_error(&format!("Failed to load --file {}: {}", path, e)));
+                            return false;
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                // Resolve target: CLI flag > file > error
+                let target = target
+                    .or_else(|| file_config.as_ref().and_then(|f| f.target.clone()));
                 let target = match target {
                     Some(t) => t,
                     None => {
                         println!(
                             "{}",
-                            renderer::render_error("--target is required. Usage: /scan --target <url> [--repo <path>]")
+                            renderer::render_error("--target is required. Usage: /scan --target <url> [--repo <path>] [--file <path.json>]")
                         );
                         return false;
                     }
                 };
+
+                // Resolve other fields: CLI flag > file > default
+                let repo = repo.or_else(|| file_config.as_ref().and_then(|f| f.repo.clone()));
                 let no_repo = repo.is_none();
                 let repo = repo.unwrap_or_default();
+                let auth = auth.or_else(|| file_config.as_ref().and_then(|f| f.auth.clone()));
+                let intensity = intensity.or_else(|| file_config.as_ref().and_then(|f| f.intensity.clone()));
+                let provider = provider.or_else(|| file_config.as_ref().and_then(|f| f.provider.clone()));
+                let model = model.or_else(|| file_config.as_ref().and_then(|f| f.model.clone()));
+                let fc_username = file_config.as_ref().and_then(|f| f.username.clone());
+                let fc_password = file_config.as_ref().and_then(|f| f.password.clone());
+                let fc_login_url = file_config.as_ref().and_then(|f| f.login_url.clone());
+                let fc_rules_avoid = file_config.as_ref().and_then(|f| f.rules_avoid.clone());
+                let fc_rules_focus = file_config.as_ref().and_then(|f| f.rules_focus.clone());
 
                 let scan_id = uuid::Uuid::new_v4().to_string();
 
@@ -568,19 +594,20 @@ impl ReplSession {
                         blackbox_only: false,
                         whitebox_only: false,
                         layers: None,
-                        username: None,
-                        password: None,
-                        cookie: None,
-                        login_url: None,
+                        username: fc_username,
+                        password: fc_password,
+                        cookie: auth,
+                        login_url: fc_login_url,
                         no_auth: false,
                         pipeline_testing: false,
                         rebuild: false,
                         max_retries: 5,
                         max_agent_iterations: 5,
                         container_config: ContainerConfig::default(),
-                        rules_avoid: None,
-                        rules_focus: None,
+                        rules_avoid: fc_rules_avoid,
+                        rules_focus: fc_rules_focus,
                         auth_context: None,
+                        max_cost: None,
                     };
 
                     s.scan_running = true;
@@ -995,4 +1022,49 @@ impl ReplSession {
         }
         None
     }
+}
+
+/// Find the most recent scan directory in the output dir by modification time.
+fn find_most_recent_scan(output_dir: &std::path::Path) -> Option<String> {
+    let entries = std::fs::read_dir(output_dir).ok()?;
+    let mut best: Option<(String, std::time::SystemTime)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() { continue; }
+        // Check if this scan dir has a deliverables subdirectory
+        if !path.join("deliverables").is_dir() { continue; }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Ok(meta) = entry.metadata() {
+            if let Ok(modified) = meta.modified() {
+                if best.as_ref().map_or(true, |(_, t)| modified > *t) {
+                    best = Some((name, modified));
+                }
+            }
+        }
+    }
+    best.map(|(name, _)| name)
+}
+
+/// JSON structure for --file scan configuration.
+#[derive(serde::Deserialize)]
+struct ScanFileConfig {
+    target: Option<String>,
+    repo: Option<String>,
+    intensity: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    auth: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+    login_url: Option<String>,
+    rules_avoid: Option<String>,
+    rules_focus: Option<String>,
+}
+
+/// Load and parse a scan config JSON file.
+fn load_scan_file(path: &str) -> Result<ScanFileConfig, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("Cannot read file: {}", e))?;
+    serde_json::from_str(&content)
+        .map_err(|e| format!("Invalid JSON: {}", e))
 }

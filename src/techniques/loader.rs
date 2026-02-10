@@ -59,6 +59,14 @@ impl TechniqueLibrary {
             .map_err(|e| SekuraError::Config(format!("Invalid glob pattern: {}", e)))?
         {
             let path = entry.map_err(|e| SekuraError::Config(format!("Glob error: {}", e)))?;
+
+            // Skip non-technique YAML files (e.g. wstg-mapping.yaml)
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if stem.starts_with("wstg-") || stem.starts_with("benchmark") {
+                    continue;
+                }
+            }
+
             let content = std::fs::read_to_string(&path)?;
             let layer_def: LayerDefinition = serde_yaml::from_str(&content)?;
             info!(layer = %layer_def.layer, techniques = layer_def.techniques.len(), "Loaded technique layer");

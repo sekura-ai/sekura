@@ -56,7 +56,7 @@ pub struct Rule {
     pub url_path: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RuleType {
     Path,

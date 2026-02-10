@@ -10,14 +10,77 @@ use super::loader::TechniqueDefinition;
 use super::resolver::{resolve_command, has_unresolved};
 use super::sorter::topological_sort;
 use super::dedup::deduplicate_findings;
+use crate::audit::AuditSession;
 use crate::auth::cookie_injector::inject_cookies;
 use tracing::{info, debug, warn};
+
+/// Scope enforcement rules parsed from config avoid/focus strings.
+#[derive(Debug, Clone, Default)]
+pub struct ScopeRules {
+    /// Paths/patterns that must NOT be targeted by any technique.
+    pub avoid_patterns: Vec<String>,
+    /// Paths/patterns that restrict scanning to only these targets (if non-empty).
+    pub focus_patterns: Vec<String>,
+}
+
+impl ScopeRules {
+    /// Parse scope rules from the optional config strings.
+    /// Format: comma-separated patterns, e.g. "/admin,/internal,*.staging.example.com"
+    pub fn from_config(rules_avoid: Option<&str>, rules_focus: Option<&str>) -> Self {
+        let avoid_patterns = rules_avoid
+            .map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
+            .unwrap_or_default();
+        let focus_patterns = rules_focus
+            .map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
+            .unwrap_or_default();
+        Self { avoid_patterns, focus_patterns }
+    }
+
+    /// Check whether a resolved command violates scope rules.
+    /// Returns Some(reason) if blocked, None if allowed.
+    pub fn check_command(&self, command: &str, technique_name: &str) -> Option<String> {
+        let cmd_lower = command.to_lowercase();
+
+        // Check avoid patterns
+        for pattern in &self.avoid_patterns {
+            let pat_lower = pattern.to_lowercase();
+            if cmd_lower.contains(&pat_lower) {
+                return Some(format!(
+                    "Technique '{}' targets avoided scope '{}' — skipping",
+                    technique_name, pattern
+                ));
+            }
+        }
+
+        // Check focus patterns: if focus is set, command must match at least one
+        if !self.focus_patterns.is_empty() {
+            let matches_focus = self.focus_patterns.iter().any(|pattern| {
+                cmd_lower.contains(&pattern.to_lowercase())
+            });
+            if !matches_focus {
+                return Some(format!(
+                    "Technique '{}' does not match any focus scope — skipping",
+                    technique_name
+                ));
+            }
+        }
+
+        None
+    }
+
+    pub fn has_rules(&self) -> bool {
+        !self.avoid_patterns.is_empty() || !self.focus_patterns.is_empty()
+    }
+}
 
 pub struct TechniqueRunner {
     container: Arc<ContainerManager>,
     context: ScanContext,
     llm: Arc<dyn LLMProvider>,
     prompt_loader: Arc<PromptLoader>,
+    scope: ScopeRules,
+    dry_run: bool,
+    audit: Option<Arc<AuditSession>>,
 }
 
 impl TechniqueRunner {
@@ -27,7 +90,25 @@ impl TechniqueRunner {
         llm: Arc<dyn LLMProvider>,
         prompt_loader: Arc<PromptLoader>,
     ) -> Self {
-        Self { container, context, llm, prompt_loader }
+        Self { container, context, llm, prompt_loader, scope: ScopeRules::default(), dry_run: false, audit: None }
+    }
+
+    /// Set scope enforcement rules (avoid/focus patterns).
+    pub fn with_scope(mut self, scope: ScopeRules) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    /// Enable dry-run mode: logs all planned techniques without executing.
+    pub fn with_dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
+    }
+
+    /// Attach audit session for container execution logging.
+    pub fn with_audit(mut self, audit: Arc<AuditSession>) -> Self {
+        self.audit = Some(audit);
+        self
     }
 
     pub async fn run_techniques(
@@ -37,6 +118,14 @@ impl TechniqueRunner {
         let sorted = topological_sort(techniques)?;
         let mut findings = Vec::new();
         let mut raw_outputs = HashMap::new();
+
+        if self.scope.has_rules() {
+            info!(
+                avoid = ?self.scope.avoid_patterns,
+                focus = ?self.scope.focus_patterns,
+                "Scope enforcement active"
+            );
+        }
 
         for technique in &sorted {
             // Check port dependencies
@@ -69,11 +158,34 @@ impl TechniqueRunner {
                 command
             };
 
+            // Scope enforcement: check avoid/focus rules
+            if let Some(reason) = self.scope.check_command(&command, &technique.name) {
+                warn!(technique = %technique.name, reason = %reason, "Blocked by scope rules");
+                continue;
+            }
+
+            // Dry-run mode: log the technique without executing
+            if self.dry_run {
+                info!(
+                    technique = %technique.name,
+                    tool = %technique.tool,
+                    command = %command,
+                    "[DRY RUN] Would execute technique"
+                );
+                raw_outputs.insert(technique.name.clone(), "[DRY RUN] Not executed".to_string());
+                continue;
+            }
+
             info!(technique = %technique.name, tool = %technique.tool, "Running technique");
 
-            // Execute in Kali container
+            // Execute in Kali container with audit logging
+            let exec_start = std::time::Instant::now();
             match self.container.exec(&command, technique.timeout).await {
                 Ok(output) => {
+                    let duration_ms = exec_start.elapsed().as_millis() as u64;
+                    if let Some(ref audit) = self.audit {
+                        audit.record_container_exec(&command, 0, duration_ms, output.len()).await;
+                    }
                     raw_outputs.insert(technique.name.clone(), output.clone());
 
                     // Analyze output using LLM (with regex fallback)
@@ -87,6 +199,10 @@ impl TechniqueRunner {
                     findings.extend(parsed);
                 }
                 Err(e) => {
+                    let duration_ms = exec_start.elapsed().as_millis() as u64;
+                    if let Some(ref audit) = self.audit {
+                        audit.record_container_exec(&command, -1, duration_ms, 0).await;
+                    }
                     warn!(technique = %technique.name, error = %e, "Technique execution failed");
                     raw_outputs.insert(
                         technique.name.clone(),
@@ -237,6 +353,9 @@ impl TechniqueRunner {
                 source: FindingSource::Blackbox,
                 verdict: None,
                 proof_of_exploit: None,
+                cwe_id: None,
+                cvss_score: None,
+                cvss_vector: None,
             });
         }
 
@@ -261,6 +380,9 @@ fn parse_nmap_ports(output: &str) -> Vec<Finding> {
                 source: FindingSource::Blackbox,
                 verdict: None,
                 proof_of_exploit: None,
+                cwe_id: None,
+                cvss_score: None,
+                cvss_vector: None,
             });
         }
     }
@@ -312,6 +434,9 @@ fn parse_tool_output_fallback(output: &str, tool: &str, technique_name: &str) ->
                 source: FindingSource::Blackbox,
                 verdict: None,
                 proof_of_exploit: None,
+                cwe_id: None,
+                cvss_score: None,
+                cvss_vector: None,
             });
         }
     }
@@ -334,5 +459,97 @@ fn categorize_indicator(indicator: &str) -> VulnCategory {
         VulnCategory::Authz
     } else {
         VulnCategory::Infrastructure
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scope_rules_empty() {
+        let scope = ScopeRules::from_config(None, None);
+        assert!(!scope.has_rules());
+        assert!(scope.check_command("nmap -sT 192.168.1.1", "port-scan").is_none());
+    }
+
+    #[test]
+    fn test_scope_rules_avoid_blocks() {
+        let scope = ScopeRules::from_config(Some("/admin,/internal"), None);
+        assert!(scope.has_rules());
+        let result = scope.check_command("nikto -h http://target.com/admin", "nikto-scan");
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("avoided scope"));
+    }
+
+    #[test]
+    fn test_scope_rules_avoid_allows() {
+        let scope = ScopeRules::from_config(Some("/admin"), None);
+        let result = scope.check_command("nmap -sT 192.168.1.1 -p 80", "port-scan");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_scope_rules_focus_blocks_non_matching() {
+        let scope = ScopeRules::from_config(None, Some("/api,/v2"));
+        assert!(scope.has_rules());
+        let result = scope.check_command("gobuster dir -u http://target.com/docs", "dir-brute");
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("focus scope"));
+    }
+
+    #[test]
+    fn test_scope_rules_focus_allows_matching() {
+        let scope = ScopeRules::from_config(None, Some("/api,/v2"));
+        let result = scope.check_command("nikto -h http://target.com/api/users", "nikto-scan");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_scope_rules_avoid_case_insensitive() {
+        let scope = ScopeRules::from_config(Some("/Admin"), None);
+        let result = scope.check_command("nikto -h http://target.com/admin", "nikto-scan");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_scope_rules_combined_avoid_and_focus() {
+        let scope = ScopeRules::from_config(Some("/internal"), Some("/api"));
+        // Matches focus but hits avoid
+        let result = scope.check_command("curl http://target.com/internal/api", "curl-test");
+        assert!(result.is_some()); // avoid takes priority
+    }
+
+    #[test]
+    fn test_categorize_indicator() {
+        assert_eq!(categorize_indicator("SQL injection"), VulnCategory::Injection);
+        assert_eq!(categorize_indicator("XSS"), VulnCategory::Xss);
+        assert_eq!(categorize_indicator("authentication bypass"), VulnCategory::Auth);
+        assert_eq!(categorize_indicator("SSRF"), VulnCategory::Ssrf);
+        assert_eq!(categorize_indicator("VULNERABLE"), VulnCategory::Infrastructure);
+    }
+
+    #[test]
+    fn test_parse_nmap_ports() {
+        let output = "22/tcp   open  ssh\n80/tcp   open  http\n443/tcp  closed https\n";
+        let findings = parse_nmap_ports(output);
+        assert_eq!(findings.len(), 2);
+        assert!(findings[0].title.contains("22/tcp"));
+        assert!(findings[1].title.contains("80/tcp"));
+    }
+
+    #[test]
+    fn test_parse_tool_output_fallback_detects_vuln() {
+        let output = "Found SQL injection in /api/users\nParameter: id\n";
+        let findings = parse_tool_output_fallback(output, "sqlmap", "sqli-scan");
+        assert!(!findings.is_empty());
+        assert!(findings.iter().any(|f| f.category == VulnCategory::Injection));
+    }
+
+    #[test]
+    fn test_parse_tool_output_fallback_empty() {
+        let output = "All checks passed. No issues found.\n";
+        let findings = parse_tool_output_fallback(output, "nikto", "nikto-scan");
+        assert!(findings.is_empty());
     }
 }

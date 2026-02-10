@@ -64,8 +64,8 @@ fn build_pipeline_config(args: &StartArgs, file_config: Option<&SekuraConfig>) -
         blackbox_only: args.blackbox_only,
         whitebox_only: args.whitebox_only,
         layers: args.layers.as_ref().map(|l| l.split(',').map(|s| s.trim().to_string()).collect()),
-        username: args.username.clone(),
-        password: args.password.clone(),
+        username: args.username.as_deref().map(config::resolve_credential),
+        password: args.password.as_deref().map(config::resolve_credential),
         cookie: args.cookie.clone(),
         login_url: args.login_url.clone(),
         no_auth: args.no_auth,
@@ -77,6 +77,7 @@ fn build_pipeline_config(args: &StartArgs, file_config: Option<&SekuraConfig>) -
         rules_avoid: args.rules_avoid.clone(),
         rules_focus: args.rules_focus.clone(),
         auth_context: None,
+        max_cost: args.max_cost,
     })
 }
 

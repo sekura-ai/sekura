@@ -142,6 +142,10 @@ pub struct StartArgs {
     /// Comma-separated areas/endpoints to focus scanning on
     #[arg(long)]
     pub rules_focus: Option<String>,
+
+    /// Maximum cost in USD before pipeline aborts gracefully
+    #[arg(long)]
+    pub max_cost: Option<f64>,
 }
 
 #[derive(Args, Clone)]

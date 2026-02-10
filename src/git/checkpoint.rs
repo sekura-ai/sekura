@@ -2,6 +2,45 @@ use std::path::Path;
 use crate::errors::SekuraError;
 use tracing::{info, warn};
 
+/// Check if the repository has uncommitted changes.
+/// Returns a warning message if there are dirty files, None if clean.
+pub fn check_repo_clean(repo_path: &Path) -> Option<String> {
+    let repo = match git2::Repository::open(repo_path) {
+        Ok(r) => r,
+        Err(_) => return None, // Not a git repo, skip check
+    };
+
+    let statuses = match repo.statuses(Some(
+        git2::StatusOptions::new()
+            .include_untracked(true)
+            .recurse_untracked_dirs(false),
+    )) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+
+    let dirty_count = statuses.iter().filter(|s| {
+        let status = s.status();
+        status.intersects(
+            git2::Status::INDEX_NEW
+                | git2::Status::INDEX_MODIFIED
+                | git2::Status::INDEX_DELETED
+                | git2::Status::WT_MODIFIED
+                | git2::Status::WT_DELETED
+                | git2::Status::WT_NEW,
+        )
+    }).count();
+
+    if dirty_count > 0 {
+        Some(format!(
+            "Repository has {} uncommitted change(s). Consider committing before scanning to ensure reproducible results.",
+            dirty_count
+        ))
+    } else {
+        None
+    }
+}
+
 pub async fn create_checkpoint(
     repo_path: &Path,
     agent_name: &str,

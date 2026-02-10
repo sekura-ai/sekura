@@ -72,4 +72,72 @@ pub struct Finding {
     pub verdict: Option<Verdict>,
     /// Reproduction steps if the vulnerability was exploited.
     pub proof_of_exploit: Option<String>,
+    /// CWE identifier (e.g. "CWE-89" for SQL injection).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwe_id: Option<String>,
+    /// CVSS v3.1 base score (0.0 - 10.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cvss_score: Option<f64>,
+    /// CVSS v3.1 vector string (e.g. "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cvss_vector: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_severity_rank_ordering() {
+        assert!(Severity::Critical.rank() < Severity::High.rank());
+        assert!(Severity::High.rank() < Severity::Medium.rank());
+        assert!(Severity::Medium.rank() < Severity::Low.rank());
+        assert!(Severity::Low.rank() < Severity::Info.rank());
+    }
+
+    #[test]
+    fn test_severity_serialization() {
+        let json = serde_json::to_string(&Severity::Critical).unwrap();
+        assert_eq!(json, "\"critical\"");
+        let parsed: Severity = serde_json::from_str("\"high\"").unwrap();
+        assert_eq!(parsed, Severity::High);
+    }
+
+    #[test]
+    fn test_vuln_category_serialization() {
+        let json = serde_json::to_string(&VulnCategory::Injection).unwrap();
+        assert_eq!(json, "\"INJECTION\"");
+        let parsed: VulnCategory = serde_json::from_str("\"XSS\"").unwrap();
+        assert_eq!(parsed, VulnCategory::Xss);
+    }
+
+    #[test]
+    fn test_finding_source_serialization() {
+        let json = serde_json::to_string(&FindingSource::Whitebox).unwrap();
+        assert_eq!(json, "\"whitebox\"");
+    }
+
+    #[test]
+    fn test_finding_roundtrip() {
+        let finding = Finding {
+            title: "SQLi in /api/users".to_string(),
+            severity: Severity::Critical,
+            category: VulnCategory::Injection,
+            description: "SQL injection found".to_string(),
+            evidence: "' OR 1=1 --".to_string(),
+            recommendation: "Use parameterized queries".to_string(),
+            tool: "sqlmap".to_string(),
+            technique: "sql-injection-scan".to_string(),
+            source: FindingSource::Blackbox,
+            verdict: None,
+            proof_of_exploit: None,
+            cwe_id: Some("CWE-89".to_string()),
+            cvss_score: Some(9.8),
+            cvss_vector: None,
+        };
+        let json = serde_json::to_string(&finding).unwrap();
+        let parsed: Finding = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.title, "SQLi in /api/users");
+        assert_eq!(parsed.severity, Severity::Critical);
+    }
 }

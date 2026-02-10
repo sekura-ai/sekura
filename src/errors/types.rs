@@ -61,4 +61,7 @@ pub enum SekuraError {
 
     #[error("Prompt error: {0}")]
     Prompt(String),
+
+    #[error("Browser error: {0}")]
+    Browser(String),
 }

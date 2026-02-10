@@ -133,6 +133,8 @@ pub struct PipelineConfig {
     pub rules_avoid: Option<String>,
     pub rules_focus: Option<String>,
     pub auth_context: Option<String>,
+    /// Maximum cost in USD before the pipeline aborts gracefully. None = unlimited.
+    pub max_cost: Option<f64>,
 }
 
 impl PipelineConfig {
@@ -230,5 +232,115 @@ impl ScanContext {
 
     pub fn has_open_ports(&self) -> bool {
         !self.open_ports.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scan_context_from_url() {
+        let ctx = ScanContext::new("http://192.168.1.1:8080/app", Intensity::Standard);
+        assert_eq!(ctx.target, "192.168.1.1");
+        assert_eq!(ctx.target_url.as_deref(), Some("http://192.168.1.1:8080/app"));
+        assert_eq!(ctx.web_port, Some(8080));
+    }
+
+    #[test]
+    fn test_scan_context_from_host_port() {
+        let ctx = ScanContext::new("192.168.1.1:3000", Intensity::Quick);
+        assert_eq!(ctx.target, "192.168.1.1");
+        assert_eq!(ctx.web_port, Some(3000));
+    }
+
+    #[test]
+    fn test_scan_context_from_plain_host() {
+        let ctx = ScanContext::new("example.com", Intensity::Thorough);
+        assert_eq!(ctx.target, "example.com");
+        assert_eq!(ctx.target_url.as_deref(), Some("http://example.com"));
+        assert_eq!(ctx.web_port, None);
+    }
+
+    #[test]
+    fn test_extract_open_ports_from_nmap() {
+        let mut ctx = ScanContext::new("192.168.1.1", Intensity::Standard);
+        let nmap_output = "22/tcp   open  ssh\n80/tcp   open  http\n443/tcp  open  https\n";
+        ctx.extract_open_ports(nmap_output);
+        assert_eq!(ctx.open_ports, vec![22, 80, 443]);
+        assert_eq!(ctx.web_port, Some(80));
+    }
+
+    #[test]
+    fn test_has_open_ports() {
+        let mut ctx = ScanContext::new("192.168.1.1", Intensity::Standard);
+        assert!(!ctx.has_open_ports());
+        ctx.open_ports.push(80);
+        assert!(ctx.has_open_ports());
+    }
+
+    #[test]
+    fn test_pipeline_state_default() {
+        let state = PipelineState::new();
+        assert_eq!(state.status, PipelineStatus::Queued);
+        assert!(state.current_phase.is_none());
+        assert!(state.completed_agents.is_empty());
+    }
+
+    #[test]
+    fn test_intensity_max_level() {
+        assert_eq!(Intensity::Quick.max_level(), 0);
+        assert_eq!(Intensity::Standard.max_level(), 1);
+        assert_eq!(Intensity::Thorough.max_level(), 2);
+    }
+
+    #[test]
+    fn test_phase_name_display() {
+        assert_eq!(format!("{}", PhaseName::WhiteboxAnalysis), "whitebox-analysis");
+        assert_eq!(format!("{}", PhaseName::Reconnaissance), "reconnaissance");
+        assert_eq!(format!("{}", PhaseName::Exploitation), "exploitation");
+    }
+
+    #[test]
+    fn test_pipeline_config_deliverables_dir() {
+        let config = PipelineConfig {
+            scan_id: "scan-001".to_string(),
+            target: "http://example.com".to_string(),
+            repo_path: PathBuf::from("/tmp"),
+            output_dir: PathBuf::from("/tmp/output"),
+            intensity: Intensity::Standard,
+            provider: "anthropic".to_string(),
+            model: None,
+            api_key: "test".to_string(),
+            base_url: "https://api.anthropic.com".to_string(),
+            skip_whitebox: false,
+            skip_blackbox: false,
+            skip_exploit: false,
+            blackbox_only: false,
+            whitebox_only: false,
+            layers: None,
+            username: None,
+            password: None,
+            cookie: None,
+            login_url: None,
+            no_auth: false,
+            pipeline_testing: false,
+            rebuild: false,
+            max_retries: 3,
+            max_agent_iterations: 5,
+            container_config: crate::config::ContainerConfig::default(),
+            rules_avoid: None,
+            rules_focus: None,
+            auth_context: None,
+            max_cost: None,
+        };
+        assert_eq!(
+            config.deliverables_dir(),
+            PathBuf::from("/tmp/output/scan-001/deliverables")
+        );
+        assert_eq!(
+            config.audit_dir(),
+            PathBuf::from("/tmp/output/scan-001/audit-logs")
+        );
     }
 }
