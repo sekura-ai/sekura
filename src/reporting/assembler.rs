@@ -1,11 +1,16 @@
 use std::path::Path;
 use crate::errors::SekuraError;
+use crate::llm::provider::LLMProvider;
 use crate::models::finding::Finding;
+use crate::prompts::{PromptLoader, PromptVariables};
 use crate::reporting::formatter::{format_executive_summary, format_finding_markdown};
-use tracing::info;
+use tracing::{info, warn};
 
 pub async fn assemble_final_report(
     deliverables_dir: &Path,
+    llm: &dyn LLMProvider,
+    prompt_loader: &PromptLoader,
+    target: &str,
 ) -> Result<String, SekuraError> {
     let evidence_files = [
         "injection_exploitation_evidence.md",
@@ -61,9 +66,58 @@ pub async fn assemble_final_report(
         full_report = format!("{}\n\n---\n\n## Infrastructure Findings\n\n{}", full_report, tool_findings);
     }
 
+    // Refine with LLM using report-executive prompt
+    let refined = refine_with_llm(&full_report, llm, prompt_loader, target).await;
+    let final_report = refined.unwrap_or(full_report);
+
     let output_path = deliverables_dir.join("comprehensive_security_assessment_report.md");
-    tokio::fs::write(&output_path, &full_report).await?;
+    tokio::fs::write(&output_path, &final_report).await?;
     info!(path = %output_path.display(), "Final report assembled");
 
-    Ok(full_report)
+    Ok(final_report)
+}
+
+/// Use the LLM with the report-executive prompt to refine the raw assembled report.
+async fn refine_with_llm(
+    raw_report: &str,
+    llm: &dyn LLMProvider,
+    prompt_loader: &PromptLoader,
+    target: &str,
+) -> Option<String> {
+    let template = match prompt_loader.load("report-executive") {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(error = %e, "Failed to load report-executive prompt, skipping LLM refinement");
+            return None;
+        }
+    };
+
+    let vars = PromptVariables {
+        target_url: target.to_string(),
+        ..Default::default()
+    };
+    let system = prompt_loader.interpolate(&template, &vars);
+
+    // Truncate raw report for LLM context
+    let truncated = if raw_report.len() > 15000 {
+        &raw_report[..15000]
+    } else {
+        raw_report
+    };
+
+    let prompt = format!(
+        "Refine the following raw security assessment into a professional executive report for target {}.\n\n## Raw Assessment\n{}\n",
+        target, truncated
+    );
+
+    match llm.complete(&prompt, Some(&system)).await {
+        Ok(response) => {
+            info!("Report refined with LLM");
+            Some(response.content)
+        }
+        Err(e) => {
+            warn!(error = %e, "LLM report refinement failed, using raw report");
+            None
+        }
+    }
 }

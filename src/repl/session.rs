@@ -578,6 +578,9 @@ impl ReplSession {
                         max_retries: 5,
                         max_agent_iterations: 5,
                         container_config: ContainerConfig::default(),
+                        rules_avoid: None,
+                        rules_focus: None,
+                        auth_context: None,
                     };
 
                     s.scan_running = true;

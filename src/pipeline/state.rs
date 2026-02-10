@@ -130,6 +130,9 @@ pub struct PipelineConfig {
     pub max_retries: u32,
     pub max_agent_iterations: u32,
     pub container_config: crate::config::ContainerConfig,
+    pub rules_avoid: Option<String>,
+    pub rules_focus: Option<String>,
+    pub auth_context: Option<String>,
 }
 
 impl PipelineConfig {

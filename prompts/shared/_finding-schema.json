@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "severity": { "type": "string", "enum": ["critical", "high", "medium", "low", "info"] },
+          "category": { "type": "string", "enum": ["injection", "xss", "auth", "ssrf", "authz", "infrastructure"] },
+          "description": { "type": "string" },
+          "evidence": { "type": "string" },
+          "recommendation": { "type": "string" },
+          "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
+          "source_file": { "type": "string" },
+          "source_line": { "type": "integer" },
+          "sink_function": { "type": "string" },
+          "verdict": { "type": "string", "enum": ["vulnerable", "safe", "potential"] }
+        },
+        "required": ["title", "severity", "category", "description", "evidence", "recommendation"]
+      }
+    }
+  },
+  "required": ["findings"]
+}

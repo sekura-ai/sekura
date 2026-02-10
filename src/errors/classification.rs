@@ -91,6 +91,10 @@ impl SekuraError {
                 error_type: "InternalError",
                 retryable: true,
             },
+            SekuraError::Prompt(_) => ErrorClassification {
+                error_type: "PromptError",
+                retryable: false,
+            },
         }
     }
 }

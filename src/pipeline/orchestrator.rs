@@ -7,6 +7,7 @@ use crate::errors::SekuraError;
 use crate::llm;
 use crate::llm::provider::LLMProvider;
 use crate::models::finding::{Finding, VulnCategory};
+use crate::prompts::PromptLoader;
 use crate::repl::events::PipelineEvent;
 use crate::reporting::formatter::{format_executive_summary, format_finding_markdown};
 use crate::techniques::TechniqueLibrary;
@@ -21,6 +22,7 @@ pub struct PipelineOrchestrator {
     container: Arc<ContainerManager>,
     llm: Arc<dyn LLMProvider>,
     technique_library: Arc<TechniqueLibrary>,
+    prompt_loader: Arc<PromptLoader>,
     event_tx: Option<mpsc::UnboundedSender<PipelineEvent>>,
     findings: Arc<RwLock<Vec<Finding>>>,
 }
@@ -50,6 +52,10 @@ impl PipelineOrchestrator {
         let techniques_dir = std::env::current_dir()?.join("techniques");
         let technique_library = Arc::new(TechniqueLibrary::load(&techniques_dir)?);
 
+        // Initialize prompt loader
+        let prompts_dir = std::env::current_dir()?.join("prompts");
+        let prompt_loader = Arc::new(PromptLoader::new(prompts_dir));
+
         Ok(Self {
             config,
             state: Arc::new(RwLock::new(PipelineState::new())),
@@ -57,6 +63,7 @@ impl PipelineOrchestrator {
             container,
             llm,
             technique_library,
+            prompt_loader,
             event_tx: None,
             findings: Arc::new(RwLock::new(Vec::new())),
         })
@@ -234,6 +241,7 @@ impl PipelineOrchestrator {
                 self.container.clone(),
                 context.clone(),
                 self.llm.clone(),
+                self.prompt_loader.clone(),
             );
 
             // Run technique groups
@@ -314,7 +322,12 @@ impl PipelineOrchestrator {
         info!("Phase 5: Reporting");
         self.set_phase(PhaseName::Reporting).await;
         self.emit_phase_started(&PhaseName::Reporting);
-        crate::reporting::assembler::assemble_final_report(&self.config.deliverables_dir()).await?;
+        crate::reporting::assembler::assemble_final_report(
+            &self.config.deliverables_dir(),
+            self.llm.as_ref(),
+            &self.prompt_loader,
+            &self.config.target,
+        ).await?;
         self.emit_phase_completed(&PhaseName::Reporting);
         info!("Phase 5 complete");
 

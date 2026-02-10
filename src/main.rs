@@ -15,9 +15,11 @@ mod config;
 mod reporting;
 mod git;
 mod errors;
+mod prompts;
 mod db;
 mod models;
 mod utils;
+mod repl;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -43,13 +45,14 @@ async fn main() {
         .init();
 
     let result = match cli.command {
-        cli::Commands::Start(args) => cli::start::handle_start(args).await,
-        cli::Commands::Scan(args) => cli::scan::handle_scan(args).await,
-        cli::Commands::Serve(args) => cli::serve::handle_serve(args).await,
-        cli::Commands::Query(args) => cli::query::handle_query(args).await,
-        cli::Commands::Logs(args) => cli::logs::handle_logs(args).await,
-        cli::Commands::Stop(args) => cli::stop::handle_stop(args).await,
-        cli::Commands::Validate(args) => handle_validate(args).await,
+        None => repl::ReplSession::new().run().await,
+        Some(cli::Commands::Start(args)) => cli::start::handle_start(args).await,
+        Some(cli::Commands::Scan(args)) => cli::scan::handle_scan(args).await,
+        Some(cli::Commands::Serve(args)) => cli::serve::handle_serve(args).await,
+        Some(cli::Commands::Query(args)) => cli::query::handle_query(args).await,
+        Some(cli::Commands::Logs(args)) => cli::logs::handle_logs(args).await,
+        Some(cli::Commands::Stop(args)) => cli::stop::handle_stop(args).await,
+        Some(cli::Commands::Validate(args)) => handle_validate(args).await,
     };
 
     match result {

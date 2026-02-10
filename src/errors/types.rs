@@ -58,4 +58,7 @@ pub enum SekuraError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("Prompt error: {0}")]
+    Prompt(String),
 }

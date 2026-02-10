@@ -2,8 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use crate::llm::provider::LLMProvider;
+use crate::prompts::{PromptLoader, PromptVariables};
 use crate::errors::SekuraError;
-use tracing::info;
+use tracing::{info, debug};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CodeAnalysis {
@@ -19,13 +20,15 @@ pub struct CodeAnalysis {
 pub struct WhiteboxAnalyzer {
     llm: Arc<dyn LLMProvider>,
     repo_path: PathBuf,
+    prompt_loader: Arc<PromptLoader>,
 }
 
 impl WhiteboxAnalyzer {
-    pub fn new(llm: Arc<dyn LLMProvider>, repo_path: &Path) -> Self {
+    pub fn new(llm: Arc<dyn LLMProvider>, repo_path: &Path, prompt_loader: Arc<PromptLoader>) -> Self {
         Self {
             llm,
             repo_path: repo_path.to_path_buf(),
+            prompt_loader,
         }
     }
 
@@ -34,6 +37,22 @@ impl WhiteboxAnalyzer {
 
         let file_manifest = self.scan_files().await?;
         let classified = self.classify_files(&file_manifest);
+
+        // Load the whitebox analysis system prompt from template
+        let system_prompt = match self.prompt_loader.load("whitebox-analysis") {
+            Ok(template) => {
+                let vars = PromptVariables {
+                    target_url: String::new(),
+                    repo_path: Some(self.repo_path.display().to_string()),
+                    ..Default::default()
+                };
+                self.prompt_loader.interpolate(&template, &vars)
+            }
+            Err(e) => {
+                debug!(error = %e, "Failed to load whitebox-analysis prompt, using fallback");
+                "You are an expert security code reviewer. Identify vulnerabilities, sinks, and attack surfaces.".to_string()
+            }
+        };
 
         let mut analysis_parts = Vec::new();
         for (group_name, files) in &classified {
@@ -46,7 +65,7 @@ impl WhiteboxAnalyzer {
                 group_name, chunk
             );
 
-            let response = self.llm.complete(&prompt, Some("You are an expert security code reviewer. Identify vulnerabilities, sinks, and attack surfaces.")).await?;
+            let response = self.llm.complete(&prompt, Some(&system_prompt)).await?;
             analysis_parts.push(response.content);
         }
 

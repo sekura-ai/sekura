@@ -4,9 +4,10 @@ use crate::container::ContainerManager;
 use crate::errors::SekuraError;
 use crate::llm::provider::LLMProvider;
 use crate::models::scan_result::ScanResult;
-use crate::pipeline::state::{PipelineConfig, ScanContext, AgentMetrics};
+use crate::pipeline::state::{PipelineConfig, ScanContext};
+use crate::prompts::{PromptLoader, PromptVariables};
 use super::registry::{AgentDefinition, AgentType};
-use tracing::{info, warn};
+use tracing::{info, warn, debug};
 
 pub struct AgentExecutor {
     agent_def: &'static AgentDefinition,
@@ -14,6 +15,7 @@ pub struct AgentExecutor {
     container: Arc<ContainerManager>,
     config: Arc<PipelineConfig>,
     context: ScanContext,
+    prompt_loader: Arc<PromptLoader>,
 }
 
 impl AgentExecutor {
@@ -23,8 +25,9 @@ impl AgentExecutor {
         container: Arc<ContainerManager>,
         config: Arc<PipelineConfig>,
         context: ScanContext,
+        prompt_loader: Arc<PromptLoader>,
     ) -> Self {
-        Self { agent_def, llm, container, config, context }
+        Self { agent_def, llm, container, config, context, prompt_loader }
     }
 
     pub async fn execute(&self) -> Result<ScanResult, SekuraError> {
@@ -94,12 +97,13 @@ impl AgentExecutor {
     }
 
     async fn run_whitebox(&self) -> Result<ScanResult, SekuraError> {
+        let system = self.load_agent_prompt()?;
         let prompt = format!(
             "Analyze the source code at {} for security vulnerabilities. Target: {}",
             self.config.repo_path.display(),
             self.config.target
         );
-        let response = self.llm.complete(&prompt, Some("You are a security code reviewer.")).await?;
+        let response = self.llm.complete(&prompt, Some(&system)).await?;
 
         // Save deliverable
         let deliverables_dir = self.config.deliverables_dir();
@@ -150,8 +154,9 @@ impl AgentExecutor {
     }
 
     async fn run_vuln_analyzer(&self) -> Result<ScanResult, SekuraError> {
+        let system = self.load_agent_prompt()?;
         let prompt = self.build_vuln_prompt()?;
-        let response = self.llm.complete(&prompt, Some("You are a vulnerability analyst.")).await?;
+        let response = self.llm.complete(&prompt, Some(&system)).await?;
 
         // Save analysis deliverable
         let deliverables_dir = self.config.deliverables_dir();
@@ -184,6 +189,44 @@ impl AgentExecutor {
 
     async fn run_exploiter(&self) -> Result<ScanResult, SekuraError> {
         let deliverables_dir = self.config.deliverables_dir();
+
+        // Try to load the exploitation queue for this vuln type
+        let queue_content = self.load_exploitation_queue().await;
+        let has_vulns = queue_content.as_ref()
+            .map(|q| !q.contains("\"vulnerabilities\": []") && q.contains("\"vulnerabilities\""))
+            .unwrap_or(false);
+
+        if has_vulns {
+            // Load the exploit prompt template and call LLM
+            let system = self.load_agent_prompt()?;
+            let _vars = self.build_prompt_variables().await;
+            let prompt = format!(
+                "Exploit the vulnerabilities in the following queue against target {}.\n\n## Exploitation Queue\n{}\n",
+                self.config.target,
+                queue_content.unwrap_or_default()
+            );
+            let response = self.llm.complete(&prompt, Some(&system)).await?;
+
+            // Write evidence deliverable
+            for deliverable in self.agent_def.required_deliverables {
+                let filename = deliverable.filename();
+                tokio::fs::write(deliverables_dir.join(filename), &response.content).await?;
+            }
+
+            return Ok(ScanResult {
+                agent_name: self.agent_def.display_name.to_string(),
+                phase: self.agent_def.phase,
+                findings: Vec::new(),
+                raw_outputs: std::collections::HashMap::new(),
+                duration_ms: 0,
+                techniques_run: 0,
+                cost_usd: response.cost_usd,
+                turns: Some(1),
+                model: Some(response.model),
+            });
+        }
+
+        // No vulnerabilities to exploit — write placeholder evidence files
         for deliverable in self.agent_def.required_deliverables {
             let filename = deliverable.filename();
             if !deliverables_dir.join(filename).exists() {
@@ -208,7 +251,12 @@ impl AgentExecutor {
     }
 
     async fn run_reporter(&self) -> Result<ScanResult, SekuraError> {
-        crate::reporting::assembler::assemble_final_report(&self.config.deliverables_dir()).await?;
+        crate::reporting::assembler::assemble_final_report(
+            &self.config.deliverables_dir(),
+            self.llm.as_ref(),
+            &self.prompt_loader,
+            &self.config.target,
+        ).await?;
 
         Ok(ScanResult {
             agent_name: self.agent_def.display_name.to_string(),
@@ -249,6 +297,120 @@ impl AgentExecutor {
         }
 
         Ok(prompt)
+    }
+
+    /// Load the system prompt for this agent from the prompt template file.
+    fn load_agent_prompt(&self) -> Result<String, SekuraError> {
+        match self.prompt_loader.load(self.agent_def.prompt_file) {
+            Ok(template) => {
+                let vars = PromptVariables {
+                    target_url: self.config.target.clone(),
+                    repo_path: if self.config.has_repo() {
+                        Some(self.config.repo_path.display().to_string())
+                    } else {
+                        None
+                    },
+                    intensity: format!("{:?}", self.config.intensity),
+                    rules_avoid: self.config.rules_avoid.clone(),
+                    rules_focus: self.config.rules_focus.clone(),
+                    cookie_string: self.config.cookie.clone(),
+                    auth_context: self.config.auth_context.clone(),
+                    ..Default::default()
+                };
+                Ok(self.prompt_loader.interpolate(&template, &vars))
+            }
+            Err(e) => {
+                debug!(
+                    agent = %self.agent_def.display_name,
+                    prompt_file = %self.agent_def.prompt_file,
+                    error = %e,
+                    "Failed to load prompt template, using fallback"
+                );
+                Ok(format!("You are a {}.", self.agent_def.display_name))
+            }
+        }
+    }
+
+    /// Build prompt variables with deliverable contents loaded from disk.
+    async fn build_prompt_variables(&self) -> PromptVariables {
+        let deliverables_dir = self.config.deliverables_dir();
+
+        let code_analysis = Self::read_deliverable_content(
+            &deliverables_dir, "code_analysis_deliverable.md", 8000
+        ).await;
+        let recon_data = Self::read_deliverable_content(
+            &deliverables_dir, "recon_deliverable.md", 8000
+        ).await;
+        let tool_findings = Self::read_deliverable_content(
+            &deliverables_dir, "tool_findings_report.md", 8000
+        ).await;
+
+        // Determine vuln type from prompt_file name
+        let vuln_type = self.agent_def.prompt_file
+            .replace("vuln-", "")
+            .replace("exploit-", "");
+
+        // Try to load the exploitation queue for the vuln type
+        let queue_filename = format!("{}_exploitation_queue.json", vuln_type);
+        let exploitation_queue = Self::read_deliverable_content(
+            &deliverables_dir, &queue_filename, 10000
+        ).await;
+
+        let open_ports = if !self.context.open_ports.is_empty() {
+            Some(self.context.open_ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "))
+        } else {
+            None
+        };
+
+        PromptVariables {
+            target_url: self.config.target.clone(),
+            repo_path: if self.config.has_repo() {
+                Some(self.config.repo_path.display().to_string())
+            } else {
+                None
+            },
+            intensity: format!("{:?}", self.config.intensity),
+            code_analysis,
+            recon_data,
+            tool_findings,
+            exploitation_queue,
+            vuln_type: Some(vuln_type),
+            rules_avoid: self.config.rules_avoid.clone(),
+            rules_focus: self.config.rules_focus.clone(),
+            login_instructions: None,
+            open_ports,
+            cookie_string: self.config.cookie.clone(),
+            auth_context: self.config.auth_context.clone(),
+        }
+    }
+
+    /// Load the exploitation queue JSON for this agent's vuln type.
+    async fn load_exploitation_queue(&self) -> Option<String> {
+        let vuln_type = self.agent_def.prompt_file
+            .replace("exploit-", "");
+        let filename = format!("{}_exploitation_queue.json", vuln_type);
+        let path = self.config.deliverables_dir().join(&filename);
+        match tokio::fs::read_to_string(&path).await {
+            Ok(content) => {
+                debug!(path = %path.display(), "Loaded exploitation queue");
+                Some(content)
+            }
+            Err(_) => {
+                debug!(path = %path.display(), "No exploitation queue found");
+                None
+            }
+        }
+    }
+
+    /// Read a deliverable file's content, truncated to max_len.
+    async fn read_deliverable_content(dir: &std::path::Path, filename: &str, max_len: usize) -> Option<String> {
+        let path = dir.join(filename);
+        match tokio::fs::read_to_string(&path).await {
+            Ok(content) if !content.trim().is_empty() => {
+                Some(content[..content.len().min(max_len)].to_string())
+            }
+            _ => None,
+        }
     }
 
     async fn validate_output(&self) -> Result<bool, SekuraError> {

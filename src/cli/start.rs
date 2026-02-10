@@ -74,10 +74,13 @@ fn build_pipeline_config(args: &StartArgs, file_config: Option<&SekuraConfig>) -
         max_retries: 5,
         max_agent_iterations: 5,
         container_config: ContainerConfig::default(),
+        rules_avoid: args.rules_avoid.clone(),
+        rules_focus: args.rules_focus.clone(),
+        auth_context: None,
     })
 }
 
-fn resolve_api_key_from_env(provider: &str) -> Option<String> {
+pub fn resolve_api_key_from_env(provider: &str) -> Option<String> {
     let var_name = match provider {
         "anthropic" => "ANTHROPIC_API_KEY",
         "openai" => "OPENAI_API_KEY",

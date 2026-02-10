@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand, Args};
 #[command(name = "sekura", version, about = "Autonomous AI Penetration Testing Agent")]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 
     /// Increase log verbosity (repeat for more)
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
@@ -134,6 +134,14 @@ pub struct StartArgs {
     /// Custom scan identifier
     #[arg(long)]
     pub scan_id: Option<String>,
+
+    /// Comma-separated areas/endpoints to avoid during scanning
+    #[arg(long)]
+    pub rules_avoid: Option<String>,
+
+    /// Comma-separated areas/endpoints to focus scanning on
+    #[arg(long)]
+    pub rules_focus: Option<String>,
 }
 
 #[derive(Args, Clone)]

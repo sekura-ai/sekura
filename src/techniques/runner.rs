@@ -5,6 +5,7 @@ use crate::errors::SekuraError;
 use crate::llm::provider::LLMProvider;
 use crate::models::finding::{Finding, Severity, VulnCategory, FindingSource};
 use crate::pipeline::state::ScanContext;
+use crate::prompts::{PromptLoader, PromptVariables};
 use super::loader::TechniqueDefinition;
 use super::resolver::{resolve_command, has_unresolved};
 use super::sorter::topological_sort;
@@ -16,11 +17,17 @@ pub struct TechniqueRunner {
     container: Arc<ContainerManager>,
     context: ScanContext,
     llm: Arc<dyn LLMProvider>,
+    prompt_loader: Arc<PromptLoader>,
 }
 
 impl TechniqueRunner {
-    pub fn new(container: Arc<ContainerManager>, context: ScanContext, llm: Arc<dyn LLMProvider>) -> Self {
-        Self { container, context, llm }
+    pub fn new(
+        container: Arc<ContainerManager>,
+        context: ScanContext,
+        llm: Arc<dyn LLMProvider>,
+        prompt_loader: Arc<PromptLoader>,
+    ) -> Self {
+        Self { container, context, llm, prompt_loader }
     }
 
     pub async fn run_techniques(
@@ -135,7 +142,20 @@ impl TechniqueRunner {
         technique_name: &str,
         hint: &str,
     ) -> Result<Vec<Finding>, SekuraError> {
-        let system = "You are a penetration testing output analyzer. Analyze the following tool output and extract security findings. Rules: Do NOT fabricate findings. Only report what is evidenced in the output. Each finding must cite specific output lines as evidence.";
+        let system = match self.prompt_loader.load("tool-output-analyzer") {
+            Ok(template) => {
+                let vars = PromptVariables {
+                    target_url: self.context.target_url.clone().unwrap_or_else(|| self.context.target.clone()),
+                    intensity: format!("{:?}", self.context.intensity),
+                    ..Default::default()
+                };
+                self.prompt_loader.interpolate(&template, &vars)
+            }
+            Err(e) => {
+                debug!(error = %e, "Failed to load tool-output-analyzer prompt, using fallback");
+                "You are a penetration testing output analyzer. Analyze the following tool output and extract security findings. Rules: Do NOT fabricate findings. Only report what is evidenced in the output. Each finding must cite specific output lines as evidence.".to_string()
+            }
+        };
 
         let truncated = if output.len() > 4000 { &output[..4000] } else { output };
 
@@ -176,7 +196,7 @@ impl TechniqueRunner {
             "required": ["findings"]
         });
 
-        let result = self.llm.complete_structured(&prompt, &schema, Some(system)).await?;
+        let result = self.llm.complete_structured(&prompt, &schema, Some(&system)).await?;
 
         let findings_array = result.get("findings")
             .and_then(|v| v.as_array())
