@@ -163,11 +163,36 @@ pub struct ScanContext {
 
 impl ScanContext {
     pub fn new(target: &str, intensity: Intensity) -> Self {
+        // Parse the target: extract hostname for network tools, keep full URL for web tools
+        let (host, url, port) = Self::parse_target(target);
         Self {
-            target: target.to_string(),
-            target_url: Some(target.to_string()),
+            target: host,
+            target_url: Some(url),
+            web_port: port,
             intensity,
             ..Default::default()
+        }
+    }
+
+    /// Parse a target string (URL or hostname) into (hostname, full_url, optional_port).
+    fn parse_target(target: &str) -> (String, String, Option<u16>) {
+        // If it looks like a URL (has ://), parse out the host
+        if target.contains("://") {
+            // Extract host from URL: scheme://host:port/path
+            let after_scheme = target.splitn(2, "://").nth(1).unwrap_or(target);
+            let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
+            let host = host_port.split(':').next().unwrap_or(host_port).to_string();
+            let port = host_port.split(':').nth(1).and_then(|p| p.parse::<u16>().ok());
+            (host, target.to_string(), port)
+        } else if target.contains(':') {
+            // host:port format without scheme
+            let host = target.split(':').next().unwrap_or(target).to_string();
+            let port = target.split(':').nth(1).and_then(|p| p.parse::<u16>().ok());
+            let url = format!("http://{}", target);
+            (host, url, port)
+        } else {
+            // Plain hostname or IP
+            (target.to_string(), format!("http://{}", target), None)
         }
     }
 
@@ -191,7 +216,7 @@ impl ScanContext {
         self.open_ports.sort();
 
         // Detect web port
-        let web_ports = [80, 443, 8080, 8443, 3000, 5000, 8000];
+        let web_ports = [80, 443, 8080, 8443, 9090, 3000, 5000, 8000, 8888];
         for &p in &web_ports {
             if self.open_ports.contains(&p) {
                 self.web_port = Some(p);

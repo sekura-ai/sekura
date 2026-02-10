@@ -1,0 +1,995 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use console::style;
+use rustyline::error::ReadlineError;
+use rustyline::{Config, Editor, ExternalPrinter as _};
+use tokio::sync::{mpsc, RwLock};
+use tokio_util::sync::CancellationToken;
+
+use crate::config::{ContainerConfig, Intensity};
+use crate::container::ContainerManager;
+use crate::errors::SekuraError;
+use crate::models::finding::Severity;
+use crate::pipeline::orchestrator::PipelineOrchestrator;
+use crate::pipeline::state::{PipelineConfig, PipelineState, PipelineStatus};
+use crate::repl::banner;
+use crate::repl::commands::{self, ContainerAction, SlashCommand};
+use crate::repl::completer::ReplHelper;
+use crate::repl::events::PipelineEvent;
+use crate::repl::renderer;
+
+/// Shared state for the REPL session.
+struct SessionState {
+    /// Currently running pipeline's state
+    pipeline_state: Option<Arc<RwLock<PipelineState>>>,
+    /// Cancel token for the running pipeline
+    cancel_token: Option<CancellationToken>,
+    /// Accumulated findings from the last scan
+    findings: Vec<(String, Severity, String)>,
+    /// Default configuration values
+    defaults: HashMap<String, String>,
+    /// Whether a scan is currently running
+    scan_running: bool,
+    /// Scan history: (scan_id, target, status, findings_count)
+    history: Vec<(String, String, String, usize)>,
+}
+
+impl SessionState {
+    fn new() -> Self {
+        let mut defaults = HashMap::new();
+        defaults.insert("provider".into(), "anthropic".into());
+        defaults.insert("intensity".into(), "standard".into());
+        defaults.insert("output".into(), "./results".into());
+
+        // Load persisted config from .sekura/config.json if it exists
+        if let Ok(content) = std::fs::read_to_string(".sekura/config.json") {
+            if let Ok(saved) = serde_json::from_str::<HashMap<String, String>>(&content) {
+                for (k, v) in saved {
+                    defaults.insert(k, v);
+                }
+            }
+        }
+
+        // Restore API keys from persisted config into environment
+        // so resolve_api_key_from_env can find them
+        if let Some(provider) = defaults.get("provider") {
+            let env_var = match provider.as_str() {
+                "anthropic" => Some("ANTHROPIC_API_KEY"),
+                "openai" => Some("OPENAI_API_KEY"),
+                "gemini" => Some("GEMINI_API_KEY"),
+                "openrouter" => Some("OPENROUTER_API_KEY"),
+                _ => None,
+            };
+            if let Some(var) = env_var {
+                if std::env::var(var).is_err() {
+                    if let Some(key) = defaults.get("api_key") {
+                        if !key.is_empty() {
+                            std::env::set_var(var, key);
+                        }
+                    }
+                }
+            }
+        }
+
+        Self {
+            pipeline_state: None,
+            cancel_token: None,
+            findings: Vec::new(),
+            defaults,
+            scan_running: false,
+            history: Vec::new(),
+        }
+    }
+
+    /// Persist current defaults to .sekura/config.json
+    fn save_defaults(&self) {
+        let _ = std::fs::create_dir_all(".sekura");
+        if let Ok(json) = serde_json::to_string_pretty(&self.defaults) {
+            let _ = std::fs::write(".sekura/config.json", json);
+        }
+    }
+}
+
+pub struct ReplSession;
+
+impl ReplSession {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub async fn run(self) -> Result<(), SekuraError> {
+        banner::show_splash();
+
+        let state = Arc::new(tokio::sync::Mutex::new(SessionState::new()));
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<PipelineEvent>();
+
+        // Set up rustyline editor
+        let config = Config::builder()
+            .auto_add_history(true)
+            .build();
+        let mut editor = Editor::with_config(config)
+            .map_err(|e| SekuraError::Internal(format!("Failed to initialize REPL: {}", e)))?;
+        editor.set_helper(Some(ReplHelper::default()));
+
+        // Try to get an ExternalPrinter for printing events while readline is active
+        let printer = editor.create_external_printer()
+            .map_err(|e| SekuraError::Internal(format!("Failed to create printer: {}", e)))?;
+        let printer = Arc::new(tokio::sync::Mutex::new(printer));
+
+        // Spawn event receiver task that prints pipeline events via ExternalPrinter
+        let printer_clone = printer.clone();
+        let state_clone = state.clone();
+        let event_task = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                // Track findings
+                if let PipelineEvent::FindingDiscovered {
+                    ref title,
+                    ref severity,
+                    ref category,
+                } = event
+                {
+                    let mut s = state_clone.lock().await;
+                    s.findings.push((title.clone(), severity.clone(), category.clone()));
+                }
+
+                // Track completion
+                if let PipelineEvent::PipelineCompleted {
+                    total_findings, ..
+                } = &event
+                {
+                    let mut s = state_clone.lock().await;
+                    s.scan_running = false;
+                    // Update last history entry
+                    if let Some(last) = s.history.last_mut() {
+                        last.2 = "completed".into();
+                        last.3 = *total_findings;
+                    }
+                }
+                if let PipelineEvent::PipelineFailed { ref error } = event {
+                    let mut s = state_clone.lock().await;
+                    s.scan_running = false;
+                    if let Some(last) = s.history.last_mut() {
+                        last.2 = format!("failed: {}", error);
+                    }
+                }
+
+                let line = renderer::render_event(&event);
+                let mut p = printer_clone.lock().await;
+                // ExternalPrinter::print expects a newline-terminated string
+                let _ = p.print(format!("{}\n", line));
+            }
+        });
+
+        // Main readline loop
+        loop {
+            let readline = {
+                // rustyline is blocking, so use spawn_blocking
+                let result = tokio::task::spawn_blocking({
+                    move || {
+                        let term_w = console::Term::stdout().size().1 as usize;
+                        let sep = format!("{}", style("─".repeat(term_w)).dim());
+                        let prompt = format!("{}\n{} ", sep, style("sekura>").cyan().bold());
+                        let result = editor.readline(&prompt);
+                        (editor, result)
+                    }
+                })
+                .await
+                .map_err(|e| SekuraError::Internal(format!("Readline task failed: {}", e)))?;
+
+                editor = result.0;
+                result.1
+            };
+
+            match readline {
+                Ok(line) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+
+                    // Bottom separator — printed after rustyline fully releases the terminal
+                    let term_w = console::Term::stdout().size().1 as usize;
+                    println!("{}", style("─".repeat(term_w)).dim());
+
+                    match commands::parse_command(trimmed) {
+                        Ok(cmd) => {
+                            let should_exit = self
+                                .handle_command(cmd, &state, &event_tx)
+                                .await;
+                            if should_exit {
+                                break;
+                            }
+                        }
+                        Err(msg) => {
+                            println!("{}", renderer::render_error(&msg));
+                        }
+                    }
+                }
+                Err(ReadlineError::Interrupted) => {
+                    // Ctrl-C: if scan is running, offer to stop it
+                    let s = state.lock().await;
+                    if s.scan_running {
+                        drop(s);
+                        println!(
+                            "{}",
+                            renderer::render_info("Scan running. Use /stop to cancel, or Ctrl-C again to quit.")
+                        );
+                    } else {
+                        println!();
+                        break;
+                    }
+                }
+                Err(ReadlineError::Eof) => {
+                    println!();
+                    break;
+                }
+                Err(err) => {
+                    println!("{}", renderer::render_error(&format!("Input error: {}", err)));
+                    break;
+                }
+            }
+        }
+
+        // Clean up
+        drop(event_tx);
+        let _ = event_task.await;
+
+        println!("{}", renderer::render_info("Goodbye."));
+        Ok(())
+    }
+
+    async fn handle_command(
+        &self,
+        cmd: SlashCommand,
+        state: &Arc<tokio::sync::Mutex<SessionState>>,
+        event_tx: &mpsc::UnboundedSender<PipelineEvent>,
+    ) -> bool {
+        match cmd {
+            SlashCommand::Exit => return true,
+
+            SlashCommand::Clear => {
+                print!("\x1B[2J\x1B[1;1H");
+            }
+
+            SlashCommand::Init => {
+                self.handle_init(state).await;
+            }
+
+            SlashCommand::Help { command } => {
+                println!("{}", renderer::render_help(command.as_deref()));
+            }
+
+            SlashCommand::Version => {
+                println!("{}", renderer::render_version());
+            }
+
+            SlashCommand::Agents => {
+                let s = state.lock().await;
+                if let Some(ref ps) = s.pipeline_state {
+                    let ps = ps.read().await;
+                    println!(
+                        "{}",
+                        renderer::render_agents(
+                            &ps.current_agents,
+                            &ps.completed_agents,
+                            &ps.failed_agents,
+                        )
+                    );
+                } else {
+                    println!(
+                        "{}",
+                        renderer::render_agents(&[], &[], &[])
+                    );
+                }
+            }
+
+            SlashCommand::Status => {
+                let s = state.lock().await;
+                if let Some(ref ps) = s.pipeline_state {
+                    let ps = ps.read().await;
+                    let status_str = match ps.status {
+                        PipelineStatus::Queued => "queued",
+                        PipelineStatus::Running => "running",
+                        PipelineStatus::Completed => "completed",
+                        PipelineStatus::Failed => "failed",
+                    };
+                    let phase_str = ps.current_phase.as_ref().map(|p| renderer::phase_display_name(p));
+                    let elapsed = chrono::Utc::now()
+                        .signed_duration_since(ps.start_time)
+                        .num_milliseconds()
+                        .max(0) as u64;
+                    let cost: f64 = ps.agent_metrics.values().filter_map(|m| m.cost_usd).sum();
+                    let findings = s.findings.len();
+                    println!(
+                        "{}",
+                        renderer::render_status(status_str, phase_str, elapsed, cost, findings)
+                    );
+                } else {
+                    println!("{}", renderer::render_info("No scan has been started."));
+                }
+            }
+
+            SlashCommand::Stop => {
+                let s = state.lock().await;
+                if s.scan_running {
+                    if let Some(ref token) = s.cancel_token {
+                        token.cancel();
+                        println!("{}", renderer::render_success("Cancellation requested."));
+                    }
+                } else {
+                    println!("{}", renderer::render_info("No scan is currently running."));
+                }
+            }
+
+            SlashCommand::Findings { severity_filter } => {
+                let s = state.lock().await;
+                let filtered: Vec<_> = if let Some(ref filter) = severity_filter {
+                    s.findings
+                        .iter()
+                        .filter(|(_, sev, _)| {
+                            let sev_str = match sev {
+                                Severity::Critical => "critical",
+                                Severity::High => "high",
+                                Severity::Medium => "medium",
+                                Severity::Low => "low",
+                                Severity::Info => "info",
+                            };
+                            sev_str == filter.to_lowercase()
+                        })
+                        .cloned()
+                        .collect()
+                } else {
+                    s.findings.clone()
+                };
+                println!("{}", renderer::render_findings(&filtered));
+            }
+
+            SlashCommand::Config { key, value } => {
+                let mut s = state.lock().await;
+                match (key, value) {
+                    (None, _) => {
+                        println!("\n{}\n", style("Configuration defaults:").white().bold());
+                        for (k, v) in &s.defaults {
+                            println!(
+                                "  {} = {}",
+                                style(k).cyan(),
+                                style(v).white(),
+                            );
+                        }
+                        println!();
+                    }
+                    (Some(k), None) => {
+                        if let Some(v) = s.defaults.get(&k) {
+                            println!("  {} = {}", style(&k).cyan(), style(v).white());
+                        } else {
+                            println!("{}", renderer::render_error(&format!("Unknown config key: {}", k)));
+                        }
+                    }
+                    (Some(k), Some(v)) => {
+                        let valid_keys = ["provider", "model", "intensity", "output", "base_url"];
+                        if valid_keys.contains(&k.as_str()) {
+                            s.defaults.insert(k.clone(), v.clone());
+                            println!(
+                                "{} {} = {}",
+                                renderer::render_success("Set"),
+                                style(&k).cyan(),
+                                style(&v).white(),
+                            );
+                        } else {
+                            println!(
+                                "{}",
+                                renderer::render_error(&format!(
+                                    "Unknown config key: {}. Valid keys: {}",
+                                    k,
+                                    valid_keys.join(", ")
+                                ))
+                            );
+                        }
+                    }
+                }
+            }
+
+            SlashCommand::History => {
+                let s = state.lock().await;
+                if s.history.is_empty() {
+                    println!("{}", renderer::render_info("No scan history."));
+                } else {
+                    println!("\n{}\n", style("Scan history:").white().bold());
+                    for (scan_id, target, status, findings) in &s.history {
+                        let status_styled = match status.as_str() {
+                            "completed" => style(status).green().to_string(),
+                            s if s.starts_with("failed") => style(status).red().to_string(),
+                            "running" => style(status).yellow().to_string(),
+                            _ => status.clone(),
+                        };
+                        println!(
+                            "  {} {} → {} ({} findings)",
+                            style(scan_id).cyan(),
+                            style(target).dim(),
+                            status_styled,
+                            findings,
+                        );
+                    }
+                    println!();
+                }
+            }
+
+            SlashCommand::Report { scan_id } => {
+                let s = state.lock().await;
+                let target_id = scan_id.or_else(|| {
+                    s.history.last().map(|(id, ..)| id.clone())
+                });
+                if let Some(id) = target_id {
+                    let report_path = PathBuf::from(
+                        s.defaults.get("output").map(|s| s.as_str()).unwrap_or("./results"),
+                    )
+                    .join(&id)
+                    .join("deliverables")
+                    .join("final-report.json");
+
+                    if report_path.exists() {
+                        match tokio::fs::read_to_string(&report_path).await {
+                            Ok(content) => {
+                                println!("\n{}\n", style(format!("Report for {}:", id)).white().bold());
+                                // Pretty-print JSON
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                                    println!("{}", serde_json::to_string_pretty(&json).unwrap_or(content));
+                                } else {
+                                    println!("{}", content);
+                                }
+                                println!();
+                            }
+                            Err(e) => {
+                                println!("{}", renderer::render_error(&format!("Failed to read report: {}", e)));
+                            }
+                        }
+                    } else {
+                        println!(
+                            "{}",
+                            renderer::render_error(&format!("Report not found at: {}", report_path.display()))
+                        );
+                    }
+                } else {
+                    println!("{}", renderer::render_info("No scan ID specified and no scan history."));
+                }
+            }
+
+            SlashCommand::Container { action } => {
+                match self.handle_container(action).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        println!("{}", renderer::render_error(&e.to_string()));
+                    }
+                }
+            }
+
+            SlashCommand::Serve { port } => {
+                let port = port.unwrap_or(8080);
+                println!(
+                    "{}",
+                    renderer::render_info(&format!("Starting API server on port {}...", port))
+                );
+                let args = crate::cli::commands::ServeArgs {
+                    port,
+                    host: "0.0.0.0".into(),
+                    db: "./data/sekura.db".into(),
+                    workers: 3,
+                };
+                tokio::spawn(async move {
+                    if let Err(e) = crate::cli::serve::handle_serve(args).await {
+                        eprintln!("{}", renderer::render_error(&format!("Server error: {}", e)));
+                    }
+                });
+                println!(
+                    "{}",
+                    renderer::render_success(&format!("API server started on port {}", port))
+                );
+            }
+
+            SlashCommand::Scan {
+                target,
+                repo,
+                intensity,
+                provider,
+                model,
+                skip_whitebox,
+                skip_blackbox,
+                skip_exploit,
+            } => {
+                // Check if scan is already running
+                {
+                    let s = state.lock().await;
+                    if s.scan_running {
+                        println!(
+                            "{}",
+                            renderer::render_error("A scan is already running. Use /stop first.")
+                        );
+                        return false;
+                    }
+                }
+
+                let target = match target {
+                    Some(t) => t,
+                    None => {
+                        println!(
+                            "{}",
+                            renderer::render_error("--target is required. Usage: /scan --target <url> [--repo <path>]")
+                        );
+                        return false;
+                    }
+                };
+                let no_repo = repo.is_none();
+                let repo = repo.unwrap_or_default();
+
+                let scan_id = uuid::Uuid::new_v4().to_string();
+
+                // Lock state to read defaults and set up scan
+                let (pipeline_config, cancel_token) = {
+                    let mut s = state.lock().await;
+                    let prov = provider
+                        .unwrap_or_else(|| s.defaults.get("provider").cloned().unwrap_or("anthropic".into()));
+                    let int = intensity
+                        .unwrap_or_else(|| s.defaults.get("intensity").cloned().unwrap_or("standard".into()));
+                    let output = s.defaults.get("output").cloned().unwrap_or("./results".into());
+
+                    let api_key = crate::cli::start::resolve_api_key_from_env(&prov)
+                        .or_else(|| s.defaults.get("api_key").cloned())
+                        .unwrap_or_default();
+
+                    let intensity_val = match int.as_str() {
+                        "quick" => Intensity::Quick,
+                        "thorough" => Intensity::Thorough,
+                        _ => Intensity::Standard,
+                    };
+
+                    println!(
+                        "  {} Using provider: {}",
+                        style("i").cyan(),
+                        style(&prov).cyan().bold(),
+                    );
+
+                    let config = PipelineConfig {
+                        scan_id: scan_id.clone(),
+                        target: target.clone(),
+                        repo_path: PathBuf::from(&repo),
+                        output_dir: PathBuf::from(&output),
+                        intensity: intensity_val,
+                        provider: prov,
+                        model,
+                        api_key,
+                        base_url: s.defaults.get("base_url")
+                            .cloned()
+                            .unwrap_or("http://localhost:11434/v1".into()),
+                        skip_whitebox: skip_whitebox || no_repo,
+                        skip_blackbox,
+                        skip_exploit,
+                        blackbox_only: false,
+                        whitebox_only: false,
+                        layers: None,
+                        username: None,
+                        password: None,
+                        cookie: None,
+                        login_url: None,
+                        no_auth: false,
+                        pipeline_testing: false,
+                        rebuild: false,
+                        max_retries: 5,
+                        max_agent_iterations: 5,
+                        container_config: ContainerConfig::default(),
+                    };
+
+                    s.scan_running = true;
+                    s.findings.clear();
+                    s.history.push((scan_id.clone(), target.clone(), "running".into(), 0));
+
+                    let token = CancellationToken::new();
+                    (config, token)
+                };
+
+                // Spawn the pipeline in a background task
+                let event_tx = event_tx.clone();
+                let state_clone = state.clone();
+
+                // Store cancel token and pipeline state
+                {
+                    let mut s = state.lock().await;
+                    s.cancel_token = Some(cancel_token);
+                }
+
+                tokio::spawn(async move {
+                    // Emit start event
+                    let _ = event_tx.send(PipelineEvent::PipelineStarted {
+                        scan_id: pipeline_config.scan_id.clone(),
+                        target: pipeline_config.target.clone(),
+                    });
+
+                    match PipelineOrchestrator::new(pipeline_config).await {
+                        Ok(orchestrator) => {
+                            // Store the pipeline state reference
+                            {
+                                let mut s = state_clone.lock().await;
+                                s.pipeline_state = Some(orchestrator.state());
+                            }
+
+                            // Set up the orchestrator's event channel
+                            let orch_with_events = orchestrator.with_event_channel(event_tx.clone());
+
+                            match orch_with_events.run().await {
+                                Ok(_summary) => {
+                                    // PipelineCompleted event is already emitted by the orchestrator
+                                }
+                                Err(e) => {
+                                    let _ = event_tx.send(PipelineEvent::PipelineFailed {
+                                        error: e.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(PipelineEvent::PipelineFailed {
+                                error: e.to_string(),
+                            });
+                            let mut s = state_clone.lock().await;
+                            s.scan_running = false;
+                        }
+                    }
+                });
+            }
+        }
+
+        false
+    }
+
+    async fn handle_container(&self, action: ContainerAction) -> Result<(), SekuraError> {
+        let config = ContainerConfig::default();
+        let manager = ContainerManager::new(&config).await?;
+
+        match action {
+            ContainerAction::Status => {
+                let status = manager.status().await;
+                let status_str = match status {
+                    crate::container::manager::ContainerStatus::Running => "running",
+                    crate::container::manager::ContainerStatus::Stopped => "stopped",
+                    crate::container::manager::ContainerStatus::NotFound => "not_found",
+                };
+                println!("{}", renderer::render_container_status(status_str));
+            }
+            ContainerAction::Start => {
+                println!("{}", renderer::render_info("Starting container..."));
+                manager.ensure_running().await?;
+                println!("{}", renderer::render_success("Container started."));
+            }
+            ContainerAction::Stop => {
+                println!("{}", renderer::render_info("Stopping container..."));
+                manager.stop(false).await?;
+                println!("{}", renderer::render_success("Container stopped."));
+            }
+            ContainerAction::Rebuild => {
+                println!("{}", renderer::render_info("Rebuilding container..."));
+                manager.stop(true).await?;
+                manager.ensure_running().await?;
+                println!("{}", renderer::render_success("Container rebuilt and started."));
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_init(&self, state: &Arc<tokio::sync::Mutex<SessionState>>) {
+        use crate::container::manager::ContainerStatus;
+
+        let term = console::Term::stdout();
+
+        println!("\n{}\n", style("Initializing Sekura...").white().bold());
+        let mut all_ok = true;
+
+        // ── Step 1: Docker daemon ──────────────────────────────────────
+        print!("  {} Checking Docker daemon... ", style("⏳").yellow());
+        let config = ContainerConfig::default();
+        let manager = match ContainerManager::new(&config).await {
+            Ok(m) => {
+                println!("{}", style("connected").green());
+                Some(m)
+            }
+            Err(e) => {
+                println!("{}", style("failed").red());
+                println!("    {}", style(format!("Cannot connect to Docker: {}", e)).red().dim());
+                println!("    {}", style("Make sure Docker Desktop is running.").dim());
+                all_ok = false;
+                None
+            }
+        };
+
+        // ── Step 2: Kali Docker image ──────────────────────────────────
+        if let Some(ref mgr) = manager {
+            print!("  {} Checking Kali image... ", style("⏳").yellow());
+            let docker = mgr.docker();
+            let image_name = config.image.as_deref().unwrap_or("sekura-kali:latest");
+            match docker.inspect_image(image_name).await {
+                Ok(_) => {
+                    println!("{}", style("found").green());
+                }
+                Err(_) => {
+                    println!("{}", style("not found — building").yellow());
+                    println!("    {}", style("This may take several minutes on first run...").dim());
+
+                    let dockerfile_dir = Self::find_docker_dir();
+                    if let Some(docker_dir) = dockerfile_dir {
+                        let build_cmd = format!(
+                            "docker build -t {} -f {}/Dockerfile.kali {}",
+                            image_name,
+                            docker_dir.display(),
+                            docker_dir.display(),
+                        );
+                        println!("    {}", style(format!("Running: {}", build_cmd)).dim());
+
+                        let status = tokio::process::Command::new("docker")
+                            .args(["build", "-t", image_name, "-f",
+                                &format!("{}/Dockerfile.kali", docker_dir.display()),
+                                &docker_dir.display().to_string()])
+                            .stdout(std::process::Stdio::inherit())
+                            .stderr(std::process::Stdio::inherit())
+                            .status()
+                            .await;
+
+                        match status {
+                            Ok(s) if s.success() => {
+                                println!("  {} Kali image {}", style("✓").green(), style("built successfully").green());
+                            }
+                            Ok(s) => {
+                                println!("  {} Build failed with exit code {}", style("✗").red(), s.code().unwrap_or(-1));
+                                all_ok = false;
+                            }
+                            Err(e) => {
+                                println!("  {} Build failed: {}", style("✗").red(), e);
+                                all_ok = false;
+                            }
+                        }
+                    } else {
+                        println!("  {} {}", style("✗").red(), style("docker/Dockerfile.kali not found").red());
+                        println!("    {}", style("Run from the project root, or build manually:").dim());
+                        println!("    {}", style(format!("docker build -t {} -f docker/Dockerfile.kali docker/", image_name)).dim());
+                        all_ok = false;
+                    }
+                }
+            }
+        }
+
+        // ── Step 3: Start container ────────────────────────────────────
+        if let Some(ref mgr) = manager {
+            print!("  {} Checking container... ", style("⏳").yellow());
+            match mgr.status().await {
+                ContainerStatus::Running => {
+                    println!("{}", style("running").green());
+                }
+                ContainerStatus::Stopped => {
+                    println!("{}", style("stopped — starting").yellow());
+                    match mgr.ensure_running().await {
+                        Ok(()) => println!("  {} Container {}", style("✓").green(), style("started").green()),
+                        Err(e) => {
+                            println!("  {} Failed to start container: {}", style("✗").red(), e);
+                            all_ok = false;
+                        }
+                    }
+                }
+                ContainerStatus::NotFound => {
+                    println!("{}", style("not found — creating").yellow());
+                    match mgr.ensure_running().await {
+                        Ok(()) => println!("  {} Container {}", style("✓").green(), style("created and started").green()),
+                        Err(e) => {
+                            println!("  {} Failed to create container: {}", style("✗").red(), e);
+                            all_ok = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Step 4: LLM provider selection ─────────────────────────────
+        println!();
+        println!("  {}", style("LLM Configuration").white().bold());
+        println!();
+        println!("  Select a provider:");
+        println!();
+        let providers = [
+            ("1", "anthropic",   "Anthropic (Claude)",      "ANTHROPIC_API_KEY"),
+            ("2", "openai",      "OpenAI (GPT-4o)",         "OPENAI_API_KEY"),
+            ("3", "gemini",      "Google Gemini",           "GEMINI_API_KEY"),
+            ("4", "openrouter",  "OpenRouter",              "OPENROUTER_API_KEY"),
+            ("5", "local",       "Local / Ollama (no key)", ""),
+        ];
+        for (num, _, label, env_var) in &providers {
+            let has_key = if env_var.is_empty() {
+                true
+            } else {
+                std::env::var(env_var).is_ok()
+            };
+            let key_hint = if env_var.is_empty() {
+                String::new()
+            } else if has_key {
+                format!(" {}", style("✓ key found").green())
+            } else {
+                format!(" {}", style("no key").dim())
+            };
+            println!(
+                "    {}  {}{}",
+                style(format!("[{}]", num)).cyan().bold(),
+                style(label).white(),
+                key_hint,
+            );
+        }
+        println!();
+
+        // Read provider choice
+        print!("  {} ", style("Enter choice [1-5]:").white());
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let choice = term.read_line().unwrap_or_default().trim().to_string();
+
+        let selected = match choice.as_str() {
+            "1" => Some(providers[0]),
+            "2" => Some(providers[1]),
+            "3" => Some(providers[2]),
+            "4" => Some(providers[3]),
+            "5" => Some(providers[4]),
+            "" => {
+                // Default: keep current
+                let s = state.lock().await;
+                let current = s.defaults.get("provider").cloned().unwrap_or("anthropic".into());
+                drop(s);
+                providers.iter().find(|(_, id, _, _)| *id == current).copied()
+            }
+            _ => {
+                println!("  {} Invalid choice, keeping current provider.", style("!").yellow());
+                None
+            }
+        };
+
+        if let Some((_, provider_id, provider_label, env_var)) = selected {
+            // Update session default
+            {
+                let mut s = state.lock().await;
+                s.defaults.insert("provider".into(), provider_id.into());
+                s.save_defaults();
+            }
+            println!(
+                "  {} Provider set to {}",
+                style("✓").green(),
+                style(provider_label).cyan().bold(),
+            );
+
+            // Check/request API key (skip for local)
+            if !env_var.is_empty() {
+                match std::env::var(env_var) {
+                    Ok(_) => {
+                        println!(
+                            "  {} API key found ({})",
+                            style("✓").green(),
+                            style(env_var).dim(),
+                        );
+                    }
+                    Err(_) => {
+                        println!();
+                        print!(
+                            "  {} ",
+                            style(format!("Enter your {} (or press Enter to skip):", env_var)).white(),
+                        );
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                        let key_input = term.read_line().unwrap_or_default().trim().to_string();
+                        if key_input.is_empty() {
+                            println!(
+                                "  {} No API key provided. Set {} before scanning.",
+                                style("!").yellow(),
+                                style(env_var).cyan(),
+                            );
+                            all_ok = false;
+                        } else {
+                            // Set for current process
+                            std::env::set_var(env_var, &key_input);
+                            // Persist API key so it survives restarts
+                            {
+                                let mut s = state.lock().await;
+                                s.defaults.insert("api_key".into(), key_input.clone());
+                                s.save_defaults();
+                            }
+                            println!(
+                                "  {} API key set and saved ({})",
+                                style("✓").green(),
+                                style(env_var).dim(),
+                            );
+                        }
+                    }
+                }
+            } else {
+                // Local provider — check base_url
+                let s = state.lock().await;
+                let base_url = s.defaults.get("base_url")
+                    .cloned()
+                    .unwrap_or("http://localhost:11434/v1".into());
+                drop(s);
+                println!(
+                    "  {} Endpoint: {}",
+                    style("i").cyan(),
+                    style(&base_url).white(),
+                );
+                println!(
+                    "    {}",
+                    style("Use /config base_url <url> to change").dim(),
+                );
+            }
+        }
+
+        // ── Step 5: Techniques directory ───────────────────────────────
+        println!();
+        println!("  {} Loading techniques...", style("⏳").yellow());
+        let techniques_dir = std::env::current_dir()
+            .map(|d| d.join("techniques"))
+            .unwrap_or_else(|_| PathBuf::from("./techniques"));
+        match crate::techniques::TechniqueLibrary::load(&techniques_dir) {
+            Ok(lib) => {
+                let total = lib.total_techniques();
+                let layers = lib.available_layers();
+                if total > 0 {
+                    println!("  {} {}", style("✓").green(), style(format!("{} techniques across {} layers", total, layers.len())).green());
+                } else {
+                    println!("  {} {}", style("!").yellow(), style("no techniques found").yellow());
+                    println!("    {}", style(format!("Add YAML files to {}", techniques_dir.display())).dim());
+                }
+            }
+            Err(e) => {
+                println!("  {} {}", style("✗").red(), style(format!("error: {}", e)).red());
+                all_ok = false;
+            }
+        }
+
+        // ── Step 6: Output directory ───────────────────────────────────
+        print!("  {} Checking output directory... ", style("⏳").yellow());
+        let output_dir = PathBuf::from("./results");
+        match std::fs::create_dir_all(&output_dir) {
+            Ok(()) => println!("{}", style(format!("{}", output_dir.display())).green()),
+            Err(e) => {
+                println!("{}", style(format!("failed: {}", e)).red());
+                all_ok = false;
+            }
+        }
+
+        // ── Summary ────────────────────────────────────────────────────
+        println!();
+        if all_ok {
+            println!(
+                "  {} {}\n",
+                style("✓").green().bold(),
+                style("Sekura is ready. Run /scan --target <url> to begin.").green().bold(),
+            );
+        } else {
+            println!(
+                "  {} {}\n",
+                style("!").yellow().bold(),
+                style("Some checks failed. Fix the issues above and run /init again.").yellow(),
+            );
+        }
+    }
+
+    /// Search common locations for the docker/ directory containing Dockerfile.kali.
+    /// Prefers the sekura-rs local docker/ dir over the legacy project-root one.
+    fn find_docker_dir() -> Option<PathBuf> {
+        // Locate the cargo manifest dir (sekura-rs/) at compile time
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut candidates = vec![
+            // sekura-rs/docker/ (Rust project's own Dockerfile)
+            manifest_dir.join("docker"),
+            // CWD/docker/
+            PathBuf::from("docker"),
+        ];
+        // Also check parent dir for legacy layout
+        if let Some(parent) = manifest_dir.parent() {
+            candidates.push(parent.join("docker"));
+        }
+        for candidate in &candidates {
+            if candidate.join("Dockerfile.kali").exists() {
+                return Some(candidate.clone());
+            }
+        }
+        None
+    }
+}

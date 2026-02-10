@@ -34,7 +34,7 @@ impl LLMProvider for GeminiProvider {
         let body = json!({
             "contents": contents,
             "generationConfig": {
-                "maxOutputTokens": 4096,
+                "maxOutputTokens": 16384,
             }
         });
 
@@ -78,14 +78,36 @@ impl LLMProvider for GeminiProvider {
     async fn complete_structured(&self, prompt: &str, schema: &Value, system: Option<&str>) -> Result<Value, SekuraError> {
         let augmented = format!("{}\n\nRespond with ONLY valid JSON matching:\n{}", prompt, serde_json::to_string_pretty(schema).unwrap_or_default());
         let response = self.complete(&augmented, system).await?;
-        // Extract JSON from response
         let text = &response.content;
+
+        // Try direct parse first
         if let Ok(v) = serde_json::from_str::<Value>(text) { return Ok(v); }
-        if let Some(start) = text.find('{') {
-            if let Some(end) = text.rfind('}') {
+
+        // Strip markdown code fences if present
+        let stripped = text.trim()
+            .strip_prefix("```json").or_else(|| text.trim().strip_prefix("```"))
+            .and_then(|s| s.strip_suffix("```"))
+            .unwrap_or(text);
+        if let Ok(v) = serde_json::from_str::<Value>(stripped.trim()) { return Ok(v); }
+
+        // Extract JSON object from the response text
+        if let Some(start) = stripped.find('{') {
+            if let Some(end) = stripped.rfind('}') {
                 if start < end {
-                    return serde_json::from_str(&text[start..=end])
-                        .map_err(|e| SekuraError::LLMApi(format!("JSON parse error: {}", e)));
+                    let candidate = &stripped[start..=end];
+                    if let Ok(v) = serde_json::from_str::<Value>(candidate) {
+                        return Ok(v);
+                    }
+                    // Truncated array recovery: try closing open arrays/objects
+                    if let Some(repaired) = repair_truncated_json(candidate) {
+                        if let Ok(v) = serde_json::from_str::<Value>(&repaired) {
+                            return Ok(v);
+                        }
+                    }
+                    return Err(SekuraError::LLMApi(format!(
+                        "JSON parse error: {}",
+                        serde_json::from_str::<Value>(candidate).unwrap_err()
+                    )));
                 }
             }
         }
@@ -94,4 +116,42 @@ impl LLMProvider for GeminiProvider {
 
     fn provider_name(&self) -> &str { "gemini" }
     fn model_name(&self) -> &str { &self.model }
+}
+
+/// Attempt to repair truncated JSON by closing open brackets.
+/// Handles the common case where an LLM response is cut off mid-array.
+fn repair_truncated_json(text: &str) -> Option<String> {
+    // Find the last complete object in the array (last '}' that precedes a truncation)
+    // Strategy: repeatedly trim from the end until we find a valid close point
+    let mut s = text.to_string();
+
+    // Remove any trailing partial object (everything after the last complete '}')
+    if let Some(last_brace) = s.rfind('}') {
+        s.truncate(last_brace + 1);
+    } else {
+        return None;
+    }
+
+    // Count open brackets and close them
+    let mut open_braces = 0i32;
+    let mut open_brackets = 0i32;
+    for ch in s.chars() {
+        match ch {
+            '{' => open_braces += 1,
+            '}' => open_braces -= 1,
+            '[' => open_brackets += 1,
+            ']' => open_brackets -= 1,
+            _ => {}
+        }
+    }
+
+    // Close any unclosed brackets
+    for _ in 0..open_braces { s.push('}'); }
+    for _ in 0..open_brackets { s.push(']'); }
+
+    if open_braces != 0 || open_brackets != 0 {
+        Some(s)
+    } else {
+        None
+    }
 }

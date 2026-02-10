@@ -15,6 +15,7 @@ pub fn format_duration(ms: u64) -> String {
 }
 
 pub fn format_cost(usd: f64) -> String {
+    let usd = usd.abs(); // avoid negative zero display
     if usd < 0.01 {
         format!("${:.4}", usd)
     } else {
