@@ -65,6 +65,7 @@ impl Completer for ReplHelper {
                 "/report" => &["findings", "finding", "executive", "evidence", "full", "html", "--scan"],
                 "/serve" => &["--port"],
                 "/container" => &["status", "start", "stop", "rebuild"],
+                "/model" => &["set", "test"],
                 _ => &[],
             };
 

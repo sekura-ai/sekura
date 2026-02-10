@@ -15,7 +15,7 @@ use crate::models::finding::{Finding, Severity};
 use crate::pipeline::orchestrator::PipelineOrchestrator;
 use crate::pipeline::state::{PipelineConfig, PipelineState, PipelineStatus};
 use crate::repl::banner;
-use crate::repl::commands::{self, ContainerAction, ReportAction, SlashCommand};
+use crate::repl::commands::{self, ContainerAction, ModelAction, ReportAction, SlashCommand};
 use crate::repl::completer::ReplHelper;
 use crate::repl::events::PipelineEvent;
 use crate::repl::progress::ScanProgress;
@@ -322,6 +322,10 @@ impl ReplSession {
 
             SlashCommand::Init => {
                 self.handle_init(state).await;
+            }
+
+            SlashCommand::Model { action } => {
+                self.handle_model(action, state).await;
             }
 
             SlashCommand::Help { command } => {
@@ -925,6 +929,215 @@ impl ReplSession {
             }
         }
         Ok(())
+    }
+
+    async fn handle_model(
+        &self,
+        action: ModelAction,
+        state: &Arc<tokio::sync::Mutex<SessionState>>,
+    ) {
+        use crate::llm::catalog::{self, PROVIDERS};
+
+        match action {
+            ModelAction::Show => {
+                let s = state.lock().await;
+                let provider = s.defaults.get("provider").cloned().unwrap_or("anthropic".into());
+                let model = s.defaults.get("model").cloned()
+                    .unwrap_or_else(|| catalog::get_default_model(&provider).to_string());
+                let has_key = if provider == "local" {
+                    true
+                } else {
+                    crate::cli::start::resolve_api_key_from_env(&provider).is_some()
+                        || s.defaults.get("api_key").map_or(false, |k| !k.is_empty())
+                };
+                println!("{}", renderer::render_model_status(&provider, &model, has_key));
+            }
+
+            ModelAction::Set => {
+                let term = console::Term::stdout();
+
+                // Build provider list with key status
+                let provider_items: Vec<(&str, &str, &str, bool)> = PROVIDERS.iter().map(|p| {
+                    let has_key = if p.env_var.is_empty() {
+                        true
+                    } else {
+                        std::env::var(p.env_var).is_ok()
+                    };
+                    (p.id, p.name, p.env_var, has_key)
+                }).collect();
+
+                print!("{}", renderer::render_provider_picker(&provider_items));
+                println!();
+                print!("  {} ", style(format!("Enter choice [1-{}]:", provider_items.len())).white());
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                let choice = term.read_line().unwrap_or_default().trim().to_string();
+
+                let idx = match choice.parse::<usize>() {
+                    Ok(n) if n >= 1 && n <= PROVIDERS.len() => n - 1,
+                    _ if choice.is_empty() => {
+                        // Default: keep current provider
+                        let s = state.lock().await;
+                        let current = s.defaults.get("provider").cloned().unwrap_or("anthropic".into());
+                        drop(s);
+                        match PROVIDERS.iter().position(|p| p.id == current) {
+                            Some(i) => i,
+                            None => 0,
+                        }
+                    }
+                    _ => {
+                        println!("  {} Invalid choice.", style("!").yellow());
+                        return;
+                    }
+                };
+
+                let provider = &PROVIDERS[idx];
+
+                // Model picker
+                let model_items: Vec<(&str, &str, &str, bool)> = provider.models.iter().map(|m| {
+                    (m.id, m.label, m.context_window, m.recommended)
+                }).collect();
+
+                print!("{}", renderer::render_model_picker(provider.name, &model_items));
+
+                if provider.id == "local" {
+                    println!("    {}", style("Tip: Enter a custom model ID if yours is not listed.").dim());
+                }
+                println!();
+                print!("  {} ", style(format!(
+                    "Enter choice [1-{}] or model ID (Enter = recommended):",
+                    model_items.len()
+                )).white());
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                let model_choice = term.read_line().unwrap_or_default().trim().to_string();
+
+                let model_id = if model_choice.is_empty() {
+                    catalog::get_default_model(provider.id).to_string()
+                } else if let Ok(n) = model_choice.parse::<usize>() {
+                    if n >= 1 && n <= provider.models.len() {
+                        provider.models[n - 1].id.to_string()
+                    } else {
+                        println!("  {} Invalid choice, using recommended model.", style("!").yellow());
+                        catalog::get_default_model(provider.id).to_string()
+                    }
+                } else {
+                    // Treat as a custom model ID
+                    model_choice
+                };
+
+                // API key check / prompt
+                if !provider.env_var.is_empty() {
+                    match std::env::var(provider.env_var) {
+                        Ok(_) => {
+                            println!(
+                                "  {} API key found ({})",
+                                style("~").green(),
+                                style(provider.env_var).dim(),
+                            );
+                        }
+                        Err(_) => {
+                            println!();
+                            print!(
+                                "  {} ",
+                                style(format!("Enter your {} (or press Enter to skip):", provider.env_var)).white(),
+                            );
+                            let _ = std::io::Write::flush(&mut std::io::stdout());
+                            let key_input = term.read_line().unwrap_or_default().trim().to_string();
+                            if !key_input.is_empty() {
+                                std::env::set_var(provider.env_var, &key_input);
+                                let mut s = state.lock().await;
+                                s.defaults.insert("api_key".into(), key_input);
+                                s.save_defaults();
+                                println!(
+                                    "  {} API key saved ({})",
+                                    style("~").green(),
+                                    style(provider.env_var).dim(),
+                                );
+                            } else {
+                                println!(
+                                    "  {} No API key provided. Set {} before scanning.",
+                                    style("!").yellow(),
+                                    style(provider.env_var).cyan(),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Save provider + model
+                {
+                    let mut s = state.lock().await;
+                    s.defaults.insert("provider".into(), provider.id.into());
+                    s.defaults.insert("model".into(), model_id.clone());
+                    s.save_defaults();
+                }
+
+                println!(
+                    "\n  {} Provider set to {}, model {}",
+                    style("~").green(),
+                    style(provider.name).cyan().bold(),
+                    style(&model_id).white().bold(),
+                );
+
+                // Connection test
+                println!("  {} Testing connection...", style("~").yellow());
+                let s = state.lock().await;
+                let api_key = crate::cli::start::resolve_api_key_from_env(provider.id)
+                    .or_else(|| s.defaults.get("api_key").cloned())
+                    .unwrap_or_default();
+                let base_url = s.defaults.get("base_url").cloned()
+                    .unwrap_or_else(|| "http://localhost:11434/v1".into());
+                drop(s);
+
+                let (success, latency_ms) = Self::test_model_connection(
+                    provider.id, &model_id, &api_key, &base_url,
+                ).await;
+                println!("  {}", renderer::render_model_test_result(
+                    success, provider.name, &model_id, latency_ms,
+                ));
+            }
+
+            ModelAction::Test => {
+                let s = state.lock().await;
+                let provider_id = s.defaults.get("provider").cloned().unwrap_or("anthropic".into());
+                let model = s.defaults.get("model").cloned()
+                    .unwrap_or_else(|| catalog::get_default_model(&provider_id).to_string());
+                let api_key = crate::cli::start::resolve_api_key_from_env(&provider_id)
+                    .or_else(|| s.defaults.get("api_key").cloned())
+                    .unwrap_or_default();
+                let base_url = s.defaults.get("base_url").cloned()
+                    .unwrap_or_else(|| "http://localhost:11434/v1".into());
+                let provider_name = catalog::get_provider(&provider_id)
+                    .map(|p| p.name)
+                    .unwrap_or(&provider_id);
+                drop(s);
+
+                println!("  {} Testing {} / {}...", style("~").yellow(), provider_name, &model);
+                let (success, latency_ms) = Self::test_model_connection(
+                    &provider_id, &model, &api_key, &base_url,
+                ).await;
+                println!("  {}", renderer::render_model_test_result(
+                    success, provider_name, &model, latency_ms,
+                ));
+            }
+        }
+    }
+
+    async fn test_model_connection(
+        provider_id: &str,
+        model: &str,
+        api_key: &str,
+        base_url: &str,
+    ) -> (bool, u64) {
+        let start = std::time::Instant::now();
+        match crate::llm::create_provider(provider_id, api_key, Some(model), Some(base_url)) {
+            Ok(llm) => {
+                match llm.complete("Respond with OK", None).await {
+                    Ok(_) => (true, start.elapsed().as_millis() as u64),
+                    Err(_) => (false, start.elapsed().as_millis() as u64),
+                }
+            }
+            Err(_) => (false, start.elapsed().as_millis() as u64),
+        }
     }
 
     async fn handle_init(&self, state: &Arc<tokio::sync::Mutex<SessionState>>) {

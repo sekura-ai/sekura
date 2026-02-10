@@ -35,6 +35,9 @@ pub enum SlashCommand {
         port: Option<u16>,
     },
     Init,
+    Model {
+        action: ModelAction,
+    },
     Version,
     Clear,
     Help {
@@ -52,6 +55,13 @@ pub enum ReportAction {
     Evidence(String),
     Full,
     Html,
+}
+
+#[derive(Debug, Clone)]
+pub enum ModelAction {
+    Show,
+    Set,
+    Test,
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +136,11 @@ pub static COMMAND_HELP: &[CommandHelp] = &[
         description: "Set up everything needed to scan (Docker image, container, LLM config)",
     },
     CommandHelp {
+        name: "model",
+        usage: "/model [set|test]",
+        description: "Show, switch, or test the LLM provider and model",
+    },
+    CommandHelp {
         name: "version",
         usage: "/version",
         description: "Show version and build info",
@@ -160,6 +175,7 @@ pub static COMMAND_NAMES: &[&str] = &[
     "/container",
     "/serve",
     "/init",
+    "/model",
     "/version",
     "/clear",
     "/help",
@@ -193,6 +209,7 @@ pub fn parse_command(input: &str) -> Result<SlashCommand, String> {
         "/container" => parse_container(args),
         "/serve" => parse_serve(args),
         "/init" => Ok(SlashCommand::Init),
+        "/model" => parse_model(args),
         "/version" => Ok(SlashCommand::Version),
         "/clear" => Ok(SlashCommand::Clear),
         "/help" => Ok(SlashCommand::Help {
@@ -432,6 +449,21 @@ fn parse_serve(args: &[&str]) -> Result<SlashCommand, String> {
         i += 1;
     }
     Ok(SlashCommand::Serve { port })
+}
+
+fn parse_model(args: &[&str]) -> Result<SlashCommand, String> {
+    let action = match args.first().copied() {
+        Some("set") => ModelAction::Set,
+        Some("test") => ModelAction::Test,
+        None => ModelAction::Show,
+        Some(other) => {
+            return Err(format!(
+                "Unknown model action: {}. Use: set, test",
+                other
+            ));
+        }
+    };
+    Ok(SlashCommand::Model { action })
 }
 
 #[cfg(test)]
@@ -716,7 +748,7 @@ mod tests {
 
     #[test]
     fn test_command_names_count() {
-        assert_eq!(COMMAND_NAMES.len(), 15);
-        assert_eq!(COMMAND_HELP.len(), 15);
+        assert_eq!(COMMAND_NAMES.len(), 16);
+        assert_eq!(COMMAND_HELP.len(), 16);
     }
 }

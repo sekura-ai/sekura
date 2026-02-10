@@ -672,6 +672,107 @@ pub fn render_report_finding_detail(index: usize, finding: &Finding) -> String {
     out
 }
 
+/// Render the current model/provider status box.
+pub fn render_model_status(provider: &str, model: &str, has_key: bool) -> String {
+    let w = 56;
+    let mut out = String::new();
+    out.push_str(&format!("\n  {}\n", style("~".to_owned() + &"~".repeat(w - 2) + "~").cyan()));
+    out.push_str(&format!("  {} {:<width$} {}\n",
+        style("|").cyan(),
+        style("LLM Configuration").white().bold(),
+        style("|").cyan(),
+        width = w - 4,
+    ));
+    out.push_str(&format!("  {}\n", style("~".to_owned() + &"~".repeat(w - 2) + "~").cyan()));
+    out.push_str(&format!("  {:<16} {}\n",
+        style("Provider:").dim(),
+        style(provider).white().bold(),
+    ));
+    out.push_str(&format!("  {:<16} {}\n",
+        style("Model:").dim(),
+        style(model).cyan(),
+    ));
+    let key_display = if has_key {
+        style("configured").green().to_string()
+    } else {
+        style("not set").red().to_string()
+    };
+    out.push_str(&format!("  {:<16} {}\n",
+        style("API Key:").dim(),
+        key_display,
+    ));
+    out
+}
+
+/// Render a numbered provider picker with API key status.
+pub fn render_provider_picker(providers: &[(&str, &str, &str, bool)]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("\n  {}\n\n", style("Select a provider:").white().bold()));
+    for (i, (_, name, env_var, has_key)) in providers.iter().enumerate() {
+        let num = i + 1;
+        let key_hint = if env_var.is_empty() {
+            String::new()
+        } else if *has_key {
+            format!(" {}", style("~ key found").green())
+        } else {
+            format!(" {}", style("no key").dim())
+        };
+        out.push_str(&format!(
+            "    {}  {}{}\n",
+            style(format!("[{}]", num)).cyan().bold(),
+            style(name).white(),
+            key_hint,
+        ));
+    }
+    out
+}
+
+/// Render a numbered model picker for a provider.
+pub fn render_model_picker(provider_name: &str, models: &[(&str, &str, &str, bool)]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("\n  {} {}\n\n",
+        style("Models for").white().bold(),
+        style(provider_name).cyan().bold(),
+    ));
+    for (i, (_, label, ctx, recommended)) in models.iter().enumerate() {
+        let num = i + 1;
+        let badge = if *recommended {
+            format!(" {}", style("(recommended)").green())
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "    {}  {} {}{}\n",
+            style(format!("[{}]", num)).cyan().bold(),
+            style(label).white(),
+            style(format!("({})", ctx)).dim(),
+            badge,
+        ));
+    }
+    out
+}
+
+/// Render the result of a model connection test.
+pub fn render_model_test_result(success: bool, provider: &str, model: &str, latency_ms: u64) -> String {
+    if success {
+        format!(
+            "{} {} / {} responded in {}ms",
+            style("~").green(),
+            style(provider).cyan().bold(),
+            style(model).white(),
+            latency_ms,
+        )
+    } else {
+        format!(
+            "{} {} / {} connection failed ({}ms)",
+            style("~").red(),
+            style(provider).cyan(),
+            style(model).white(),
+            latency_ms,
+        )
+    }
+}
+
 /// Render a phase name for display.
 pub fn phase_display_name(phase: &PhaseName) -> &'static str {
     match phase {
