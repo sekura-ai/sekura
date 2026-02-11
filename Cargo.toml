@@ -40,7 +40,7 @@ serde_json = "1"
 serde_yaml = "0.9"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "cookies"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "rustls-tls"] }
 
 # Docker SDK
 bollard = "0.17"
