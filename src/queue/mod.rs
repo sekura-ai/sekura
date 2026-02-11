@@ -12,10 +12,13 @@ pub struct ExploitationQueue {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueEntry {
+    #[serde(alias = "ID")]
     pub id: String,
     pub vulnerability_type: String,
+    #[serde(alias = "source_endpoint")]
     pub source: String,
-    pub path: String,
+    #[serde(default)]
+    pub path: Option<String>,
     pub sink_call: Option<String>,
     pub slot_type: Option<String>,
     pub sanitization_observed: Option<String>,

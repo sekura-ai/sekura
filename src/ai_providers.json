@@ -785,6 +785,20 @@
           "name": "DeepSeek R1 Distill 70B"
         }
       ]
+    },
+    "local": {
+      "name": "Local / Ollama",
+      "base_url": "http://localhost:11434/v1",
+      "note": "Local models via Ollama, LM Studio, or any OpenAI-compatible server",
+      "models": [
+        {
+          "id": "qwen2.5-coder:1.5b",
+          "name": "Qwen 2.5 Coder 1.5B",
+          "context_window": 32768,
+          "supports_vision": false,
+          "supports_tools": false
+        }
+      ]
     }
   },
   "_meta": {

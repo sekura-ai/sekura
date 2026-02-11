@@ -150,19 +150,22 @@ async fn build_vuln_variables(
 
 /// Extract an ExploitationQueue from LLM response text by finding the JSON block.
 fn extract_exploitation_queue(response: &str, vuln_type: VulnType) -> ExploitationQueue {
-    // Try to find a JSON block in the response
-    let json_candidates = [
-        // Look for ```json ... ``` blocks
-        extract_json_block(response),
-        // Look for raw JSON starting with {"vulnerabilities"
-        extract_raw_json(response),
-    ];
+    // Collect all JSON candidates: code blocks + raw JSON patterns
+    let mut candidates: Vec<String> = extract_all_json_blocks(response);
+    if let Some(raw) = extract_raw_json(response) {
+        candidates.push(raw);
+    }
 
-    for candidate in json_candidates.into_iter().flatten() {
-        match serde_json::from_str::<ExploitationQueue>(&candidate) {
+    // Try each candidate, preferring blocks with actual vulnerabilities
+    let mut best_empty: Option<ExploitationQueue> = None;
+    for candidate in &candidates {
+        match serde_json::from_str::<ExploitationQueue>(candidate) {
             Ok(queue) => {
                 debug!(vuln_type = %vuln_type.as_str(), count = queue.vulnerabilities.len(), "Parsed exploitation queue");
-                return queue;
+                if !queue.vulnerabilities.is_empty() {
+                    return queue;
+                }
+                best_empty = Some(queue);
             }
             Err(e) => {
                 debug!(vuln_type = %vuln_type.as_str(), error = %e, "Failed to parse JSON candidate");
@@ -170,39 +173,65 @@ fn extract_exploitation_queue(response: &str, vuln_type: VulnType) -> Exploitati
         }
     }
 
+    if let Some(empty) = best_empty {
+        return empty;
+    }
+
     warn!(vuln_type = %vuln_type.as_str(), "No valid exploitation queue found in LLM response, returning empty");
     ExploitationQueue { vulnerabilities: Vec::new() }
 }
 
-/// Extract a JSON code block delimited by ```json ... ```
-fn extract_json_block(text: &str) -> Option<String> {
-    let start_markers = ["```json\n", "```json\r\n", "```JSON\n"];
-    for marker in start_markers {
-        if let Some(start) = text.find(marker) {
-            let json_start = start + marker.len();
-            if let Some(end) = text[json_start..].find("```") {
-                return Some(text[json_start..json_start + end].trim().to_string());
+/// Extract ALL JSON code blocks delimited by ```json ... ```
+fn extract_all_json_blocks(text: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let lower = text.to_lowercase();
+    let mut search_from = 0;
+
+    while search_from < lower.len() {
+        // Find next ```json marker (case-insensitive)
+        if let Some(marker_pos) = lower[search_from..].find("```json") {
+            let abs_pos = search_from + marker_pos;
+            // Skip past the marker and any trailing whitespace/newline
+            let after_marker = abs_pos + 7; // len("```json")
+            let json_start = text[after_marker..].find(|c: char| c != ' ' && c != '\t' && c != '\r' && c != '\n')
+                .map(|off| after_marker + off)
+                .unwrap_or(after_marker);
+            // Find the closing ```
+            if let Some(end_offset) = text[json_start..].find("```") {
+                let block = text[json_start..json_start + end_offset].trim().to_string();
+                if !block.is_empty() {
+                    blocks.push(block);
+                }
+                search_from = json_start + end_offset + 3;
+            } else {
+                search_from = json_start;
+                break;
             }
+        } else {
+            break;
         }
     }
-    None
+    blocks
 }
 
 /// Extract raw JSON that starts with {"vulnerabilities"
 fn extract_raw_json(text: &str) -> Option<String> {
-    if let Some(start) = text.find("{\"vulnerabilities\"") {
-        // Find the matching closing brace
-        let mut depth = 0;
-        for (i, ch) in text[start..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(text[start..start + i + 1].to_string());
+    // Try both quoted styles the LLM might use
+    let patterns = ["{\"vulnerabilities\"", "{ \"vulnerabilities\""];
+    for pattern in patterns {
+        if let Some(start) = text.find(pattern) {
+            let mut depth = 0;
+            for (i, ch) in text[start..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(text[start..start + i + 1].to_string());
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
@@ -234,15 +263,16 @@ fn queue_to_findings(queue: &ExploitationQueue, vuln_type: VulnType) -> Vec<Find
             crate::queue::Confidence::Low => Severity::Low,
         };
 
+        let path_str = entry.path.as_deref().unwrap_or("N/A");
         Some(Finding {
-            title: format!("{}: {} at {}", vuln_type.as_str().to_uppercase(), entry.vulnerability_type, entry.path),
+            title: format!("{}: {} at {}", vuln_type.as_str().to_uppercase(), entry.vulnerability_type, path_str),
             severity,
             category: category.clone(),
             description: entry.exploitation_hypothesis.clone().unwrap_or_else(|| entry.vulnerability_type.clone()),
             evidence: format!(
                 "Source: {}\nPath: {}\nSink: {}\nVerdict: {} ({})",
                 entry.source,
-                entry.path,
+                path_str,
                 entry.sink_call.as_deref().unwrap_or("N/A"),
                 entry.verdict,
                 format!("{:?}", entry.confidence).to_lowercase(),

@@ -2,7 +2,6 @@
   "target": "http://localhost:3000",
   "repo": "/Volumes/IMacExtend/code/agents/pentesting/sekura-rs/repos/juice-shop",
   "intensity": "thorough",
-  "provider": "gemini",
   "rules_focus": "/api, /rest, /ftp, /assets/public",
   "rules_avoid": "/socket.io"
 }

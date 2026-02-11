@@ -202,7 +202,7 @@ impl FileInfo {
         if path_str.contains("auth") || path_str.contains("login") { score += 8; }
         if path_str.contains("model") || path_str.contains("db") { score += 6; }
         if path_str.contains("config") { score += 4; }
-        if path_str.contains("test") { score -= 2; }
+        if path_str.contains("test") { score = score.saturating_sub(2); }
         score
     }
 }

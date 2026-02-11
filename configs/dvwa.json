@@ -2,7 +2,6 @@
   "target": "http://localhost:9090",
   "repo": "/Volumes/IMacExtend/code/agents/pentesting/sekura-rs/repos/DVWA",
   "intensity": "thorough",
-  "provider": "gemini",
   "auth": "PHPSESSID=default; security=low",
   "username": "admin",
   "password": "password",

@@ -29,7 +29,10 @@ pub struct WebAuthenticator {
     target_url: String,
     username: Option<String>,
     password: Option<String>,
+    /// Host-side path for reading cookies back after auth
     cookie_file: PathBuf,
+    /// Container-side path where curl writes cookies
+    container_cookie_file: String,
 }
 
 impl WebAuthenticator {
@@ -46,6 +49,7 @@ impl WebAuthenticator {
             username,
             password,
             cookie_file: output_dir.join("cookies.txt"),
+            container_cookie_file: "/tmp/sekura_cookies.txt".to_string(),
         }
     }
 
@@ -72,11 +76,12 @@ impl WebAuthenticator {
         // 2. Get CSRF token from login page
         let csrf_token = self.extract_csrf_token(&login_url).await?;
 
-        // 3. Submit credentials via curl in container
+        // 3. Submit credentials via curl in container (using container-local cookie path)
+        let cfile = &self.container_cookie_file;
         let mut cmd = format!(
             "curl -v -c {} -b {} -L -X POST '{}' -d 'username={}&password={}'",
-            self.cookie_file.display(),
-            self.cookie_file.display(),
+            cfile,
+            cfile,
             login_url,
             username,
             password,
@@ -93,6 +98,8 @@ impl WebAuthenticator {
         let success = self.verify_auth().await?;
         if success {
             info!("Authentication successful");
+            // Copy cookie jar from container to host for get_cookie_string()
+            self.copy_cookies_to_host().await;
         } else {
             warn!("Authentication may have failed — no session cookie detected");
         }
@@ -124,7 +131,7 @@ impl WebAuthenticator {
         // Fetch the login page and extract all hidden input fields
         let cmd = format!(
             "curl -s -c {} '{}' | grep -oP '<input[^>]+type=\"hidden\"[^>]*>' | grep -oP 'name=\"\\K[^\"]*|value=\"\\K[^\"]*'",
-            self.cookie_file.display(),
+            self.container_cookie_file,
             login_url
         );
         let output = self.container.exec(&cmd, 15).await?;
@@ -147,7 +154,7 @@ impl WebAuthenticator {
     }
 
     async fn verify_auth(&self) -> Result<bool, SekuraError> {
-        let cmd = format!("cat {} 2>/dev/null", self.cookie_file.display());
+        let cmd = format!("cat {} 2>/dev/null", self.container_cookie_file);
         let output = self.container.exec(&cmd, 5).await?;
 
         // Check for common session cookie names
@@ -157,12 +164,25 @@ impl WebAuthenticator {
     }
 
     pub fn get_cookie_string(&self) -> Result<Option<String>, SekuraError> {
-        if !self.cookie_file.exists() {
+        // Try host-side file first (populated by copy_cookies_to_host)
+        let content = if self.cookie_file.exists() {
+            std::fs::read_to_string(&self.cookie_file)?
+        } else {
             return Ok(None);
-        }
+        };
 
-        let content = std::fs::read_to_string(&self.cookie_file)?;
-        let cookies: Vec<String> = content.lines()
+        let cookies = Self::parse_cookie_jar(&content);
+
+        if cookies.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(cookies.join("; ")))
+        }
+    }
+
+    /// Parse Netscape cookie jar format into "name=value" pairs.
+    fn parse_cookie_jar(content: &str) -> Vec<String> {
+        content.lines()
             .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
             .filter_map(|l| {
                 let parts: Vec<&str> = l.split('\t').collect();
@@ -172,16 +192,34 @@ impl WebAuthenticator {
                     None
                 }
             })
-            .collect();
+            .collect()
+    }
 
-        if cookies.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(cookies.join("; ")))
+    /// Copy the cookie jar from the container to the host-side path.
+    async fn copy_cookies_to_host(&self) {
+        let cmd = format!("cat {} 2>/dev/null", self.container_cookie_file);
+        match self.container.exec(&cmd, 5).await {
+            Ok(content) if !content.trim().is_empty() => {
+                // Ensure parent dir exists
+                if let Some(parent) = self.cookie_file.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Err(e) = std::fs::write(&self.cookie_file, &content) {
+                    warn!(error = %e, "Failed to write cookie file to host");
+                }
+            }
+            _ => {
+                debug!("No cookies to copy from container");
+            }
         }
     }
 
     pub fn cookie_file(&self) -> &PathBuf {
         &self.cookie_file
+    }
+
+    /// Returns the container-side cookie file path (for use in container exec commands).
+    pub fn container_cookie_path(&self) -> &str {
+        &self.container_cookie_file
     }
 }

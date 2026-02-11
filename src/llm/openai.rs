@@ -14,11 +14,15 @@ pub struct OpenAIProvider {
 
 impl OpenAIProvider {
     pub fn new(api_key: &str, model: Option<&str>) -> Self {
+        Self::with_base_url(api_key, model, "https://api.openai.com/v1")
+    }
+
+    pub fn with_base_url(api_key: &str, model: Option<&str>, base_url: &str) -> Self {
         Self {
             client: Client::new(),
             api_key: api_key.to_string(),
             model: model.unwrap_or("gpt-4o").to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
+            base_url: base_url.to_string(),
         }
     }
 }

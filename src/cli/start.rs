@@ -82,12 +82,9 @@ fn build_pipeline_config(args: &StartArgs, file_config: Option<&SekuraConfig>) -
 }
 
 pub fn resolve_api_key_from_env(provider: &str) -> Option<String> {
-    let var_name = match provider {
-        "anthropic" => "ANTHROPIC_API_KEY",
-        "openai" => "OPENAI_API_KEY",
-        "gemini" => "GEMINI_API_KEY",
-        "openrouter" => "OPENROUTER_API_KEY",
-        _ => return None,
-    };
-    std::env::var(var_name).ok()
+    let var_name = crate::llm::catalog::env_var_for_provider(provider);
+    if var_name.is_empty() {
+        return None;
+    }
+    std::env::var(&var_name).ok()
 }
