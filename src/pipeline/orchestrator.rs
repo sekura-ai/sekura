@@ -336,7 +336,7 @@ impl PipelineOrchestrator {
             if let Some(ref tx) = self.event_tx {
                 runner_builder = runner_builder.with_event_channel(tx.clone());
             }
-            let runner = runner_builder;
+            let mut runner = runner_builder;
 
             // Run technique groups — per-technique events emitted by the runner
             let layers = ["network", "ip", "tcp"];
@@ -345,6 +345,7 @@ impl PipelineOrchestrator {
                 if let Some(techs) = self.technique_library.get_all_techniques_for_layer(layer) {
                     let (findings, outputs) = runner.run_techniques(techs, layer).await?;
                     context.update_from_outputs(&outputs);
+                    runner.update_context(&context);
                     info!(layer, findings = findings.len(), "Layer scan complete");
                     self.accumulate_findings(findings).await;
                 }
@@ -356,6 +357,7 @@ impl PipelineOrchestrator {
                 if let Some(techs) = self.technique_library.get_all_techniques_for_layer(layer) {
                     let (findings, outputs) = runner.run_techniques(techs, layer).await?;
                     context.update_from_outputs(&outputs);
+                    runner.update_context(&context);
                     info!(layer, findings = findings.len(), "Layer scan complete");
                     self.accumulate_findings(findings).await;
                 }
@@ -372,6 +374,9 @@ impl PipelineOrchestrator {
             self.emit_phase_completed(&PhaseName::Reconnaissance);
             info!("Phase 2 complete");
         }
+
+        // Write findings so vuln analysis can read tool_findings_report.md
+        self.write_findings_to_deliverables().await?;
 
         // Phases 3-4: Vulnerability Analysis + Exploitation (pipelined)
         if !self.config.skip_exploit && !self.config.blackbox_only {

@@ -133,6 +133,11 @@ impl TechniqueRunner {
         self
     }
 
+    /// Update the runner's scan context (e.g. after port discovery).
+    pub fn update_context(&mut self, context: &ScanContext) {
+        self.context = context.clone();
+    }
+
     pub async fn run_techniques(
         &self,
         techniques: &[TechniqueDefinition],
