@@ -113,6 +113,39 @@ A guard is sufficient if ALL of the following hold:
 - Client-side role checks without server-side enforcement
 </false_positives_to_avoid>
 
+<blackbox_methodology>
+## Blackbox Analysis Mode
+
+When NO source code is available ({{CODE_ANALYSIS}} is empty), switch to blackbox analysis:
+
+1. **Analyze Tool Findings:** Use the Tool Findings data to identify authorization weaknesses:
+   - Exposed sensitive files: .htpasswd, .htaccess, admin panels, config files
+   - Directory traversal indicators: successful `../` sequences in tool output
+   - IDOR-susceptible URL patterns: sequential IDs in URLs (e.g., /user/1, /order/123)
+   - Unprotected admin/management endpoints discovered by directory brute-forcing
+   - Exposed server-status, phpinfo, debug endpoints
+
+2. **Infer Attack Surface:** From discovered endpoints, parameters, and technologies:
+   - Resource endpoints with ID parameters (potential IDOR)
+   - Admin panels and management interfaces
+   - API endpoints with role-based access patterns
+   - File download/upload endpoints with path parameters
+
+3. **Generate Hypotheses:** Based on tool output patterns:
+   - Exposed admin panel without redirect → missing role check
+   - Sequential ID parameters → potential IDOR
+   - Directory listing enabled → authorization bypass on static resources
+   - Sensitive files accessible without auth → broken access control
+
+4. **Populate Queue:** Create exploitation queue entries using observed endpoints and parameters
+
+Adjust the vulnerability JSON format for blackbox mode:
+- `endpoint`: Use the observed HTTP endpoint (e.g., "GET /admin/dashboard")
+- `vulnerable_code_location`: Use "blackbox — inferred from HTTP response"
+- `guard_evidence`: Use "no guard observed — endpoint returned 200 without authentication"
+- `confidence`: Cap at "medium" unless tool output confirms unauthorized access
+</blackbox_methodology>
+
 <output_instructions>
 You MUST produce TWO outputs:
 

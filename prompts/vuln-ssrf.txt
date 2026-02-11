@@ -117,6 +117,39 @@ For each SSRF sink identified, trace backward from the HTTP client call:
 - **Semi-blind:** Partial signals (error codes, timing differences)
 </methodology>
 
+<blackbox_methodology>
+## Blackbox Analysis Mode
+
+When NO source code is available ({{CODE_ANALYSIS}} is empty), switch to blackbox analysis:
+
+1. **Analyze Tool Findings:** Use the Tool Findings data to identify SSRF indicators:
+   - URL parameters accepting full URLs (e.g., ?url=, ?redirect=, ?next=, ?dest=)
+   - Redirect chains observed in HTTP responses (301/302 to user-controlled destinations)
+   - Webhook or callback URL configuration endpoints
+   - Import-from-URL features (avatar upload via URL, RSS feed imports, PDF generators)
+   - Open redirect vulnerabilities that could chain into SSRF
+
+2. **Infer Attack Surface:** From discovered endpoints, parameters, and technologies:
+   - Proxy or gateway endpoints
+   - URL preview/unfurling features
+   - File fetch/download endpoints accepting URLs
+   - Integration webhooks and callback configuration
+
+3. **Generate Hypotheses:** Based on tool output patterns:
+   - URL parameter reflects fetched content → reflected SSRF
+   - Redirect parameter without validation → open redirect chainable to SSRF
+   - Cloud environment (AWS/GCP/Azure metadata) → metadata endpoint access
+   - Internal service discovery via timing differences
+
+4. **Populate Queue:** Create exploitation queue entries using observed endpoints and parameters
+
+Adjust the vulnerability JSON format for blackbox mode:
+- `source_endpoint`: Use the observed HTTP endpoint (e.g., "GET /fetch?url=")
+- `vulnerable_code_location`: Use "blackbox — inferred from HTTP response behavior"
+- `vulnerable_parameter`: Use the observed parameter name
+- `confidence`: Cap at "medium" unless tool output confirms server-side fetch behavior
+</blackbox_methodology>
+
 <output_instructions>
 You MUST produce TWO outputs:
 

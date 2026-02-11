@@ -122,6 +122,39 @@ If backward trace reaches a database read without a valid sanitizer:
 - Incorrect encoding as fix (HTML encoding inside JavaScript string context)
 </false_positives_to_avoid>
 
+<blackbox_methodology>
+## Blackbox Analysis Mode
+
+When NO source code is available ({{CODE_ANALYSIS}} is empty), switch to blackbox analysis:
+
+1. **Analyze Tool Findings:** Use the Tool Findings data to identify XSS indicators:
+   - Reflected parameters appearing unencoded in HTTP responses
+   - Missing security headers: Content-Security-Policy, X-XSS-Protection, X-Content-Type-Options
+   - Input fields and forms without evidence of output encoding
+   - JavaScript event handlers or inline scripts near user-controlled data
+   - Tool-reported XSS findings (nikto, nuclei, dalfox results)
+
+2. **Infer Attack Surface:** From discovered endpoints, parameters, and technologies:
+   - Search pages reflecting query parameters
+   - Error pages displaying user input
+   - User profile pages, comment sections, message boards
+   - URL parameters rendered in page content
+
+3. **Generate Hypotheses:** Based on tool output patterns:
+   - Missing CSP header → no script-src restrictions
+   - Reflected parameters in HTML body → potential reflected XSS
+   - Missing X-XSS-Protection → browser mitigations disabled
+   - Technology fingerprints (PHP echo, JSP expression) → framework-specific sinks
+
+4. **Populate Queue:** Create exploitation queue entries using observed endpoints and parameters
+
+Adjust the vulnerability JSON format for blackbox mode:
+- `source`: Use the HTTP endpoint/parameter observed (e.g., "GET /search?q= — q parameter")
+- `path`: Use "blackbox — inferred from [tool] output"
+- `sink_function`: Use "unknown — inferred from response reflection"
+- `confidence`: Cap at "medium" unless tool output confirms reflection without encoding
+</blackbox_methodology>
+
 <output_instructions>
 You MUST produce TWO outputs:
 

@@ -202,10 +202,9 @@ impl ScanContext {
     }
 
     pub fn update_from_outputs(&mut self, raw_outputs: &HashMap<String, String>) {
-        for (key, output) in raw_outputs {
-            if key.contains("tcp") || key.contains("nmap") {
-                self.extract_open_ports(output);
-            }
+        for (_key, output) in raw_outputs {
+            // Always try to extract — regex only matches nmap-style port lines (e.g. "80/tcp open")
+            self.extract_open_ports(output);
         }
     }
 
@@ -277,6 +276,30 @@ mod tests {
         assert!(!ctx.has_open_ports());
         ctx.open_ports.push(80);
         assert!(ctx.has_open_ports());
+    }
+
+    #[test]
+    fn test_update_from_outputs_uppercase_technique_name() {
+        let mut ctx = ScanContext::new("192.168.1.1", Intensity::Standard);
+        let mut outputs = HashMap::new();
+        // Technique names use uppercase like "TCP SYN Port Scan" — ports must still be extracted
+        outputs.insert(
+            "TCP SYN Port Scan".to_string(),
+            "22/tcp   open  ssh\n80/tcp   open  http\n443/tcp  open  https\n".to_string(),
+        );
+        ctx.update_from_outputs(&outputs);
+        assert_eq!(ctx.open_ports, vec![22, 80, 443]);
+        assert_eq!(ctx.web_port, Some(80));
+    }
+
+    #[test]
+    fn test_update_from_outputs_no_port_lines() {
+        let mut ctx = ScanContext::new("192.168.1.1", Intensity::Standard);
+        let mut outputs = HashMap::new();
+        // Output without port lines should not add any ports
+        outputs.insert("Nikto Web Scan".to_string(), "- Server: Apache\n- No open ports\n".to_string());
+        ctx.update_from_outputs(&outputs);
+        assert!(ctx.open_ports.is_empty());
     }
 
     #[test]

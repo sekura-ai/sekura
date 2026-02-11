@@ -285,6 +285,34 @@ impl PipelineOrchestrator {
 
         // Build initial scan context
         let mut context = ScanContext::new(&self.config.target, self.config.intensity);
+
+        // Auto-authenticate if credentials provided
+        if !self.config.no_auth {
+            if let (Some(username), Some(password)) = (&self.config.username, &self.config.password) {
+                info!("Pre-flight: Attempting web authentication");
+                let mut authenticator = crate::auth::web_auth::WebAuthenticator::new(
+                    self.container.clone(),
+                    &self.config.target,
+                    Some(username.clone()),
+                    Some(password.clone()),
+                    &self.config.output_dir.join(&self.config.scan_id),
+                );
+                match authenticator.authenticate(self.config.login_url.as_deref()).await {
+                    Ok(true) => {
+                        if let Ok(Some(cookies)) = authenticator.get_cookie_string() {
+                            info!(cookies = %cookies, "Authentication successful, using session cookies");
+                            context.cookie_string = Some(cookies);
+                            context.cookie_file = Some(authenticator.cookie_file().clone());
+                            context.authenticated = true;
+                        }
+                    }
+                    Ok(false) => warn!("Authentication returned false — scanning without auth"),
+                    Err(e) => warn!(error = %e, "Authentication failed — scanning without auth"),
+                }
+            }
+        }
+
+        // Manual cookie override takes precedence
         if let Some(cookie) = &self.config.cookie {
             context.cookie_string = Some(cookie.clone());
             context.authenticated = true;

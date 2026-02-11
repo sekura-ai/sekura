@@ -131,6 +131,38 @@ The `vulnerability` JSON object MUST follow this exact format:
 - Confusing authentication with authorization flaws
 </false_positives_to_avoid>
 
+<blackbox_methodology>
+## Blackbox Analysis Mode
+
+When NO source code is available ({{CODE_ANALYSIS}} is empty), switch to blackbox analysis:
+
+1. **Analyze Tool Findings:** Use the Tool Findings data to identify authentication weaknesses:
+   - Cookie flags analysis: missing HttpOnly, Secure, SameSite attributes
+   - Login page behavior: consistent vs. differential error messages (user enumeration)
+   - Credential exposure: default credentials found, login pages over HTTP
+   - Session management from HTTP headers: Set-Cookie patterns, session ID entropy
+   - Missing security headers: Strict-Transport-Security, Cache-Control on auth pages
+
+2. **Infer Attack Surface:** From discovered endpoints, parameters, and technologies:
+   - Login, registration, password reset, and logout endpoints
+   - Session cookie names and attributes observed in responses
+   - "Remember me" functionality, OAuth/SSO endpoints
+   - Admin panels and their authentication mechanisms
+
+3. **Generate Hypotheses:** Based on tool output patterns:
+   - Missing Secure flag on session cookie → session hijacking via HTTP
+   - No rate limiting evidence → credential stuffing / brute force possible
+   - Predictable session IDs → session prediction attack
+   - Default credentials working → immediate account takeover
+
+4. **Populate Queue:** Create exploitation queue entries using observed endpoints and parameters
+
+Adjust the vulnerability JSON format for blackbox mode:
+- `source_endpoint`: Use the observed HTTP endpoint (e.g., "POST /login")
+- `vulnerable_code_location`: Use "blackbox — inferred from HTTP response headers/behavior"
+- `confidence`: Cap at "medium" unless tool output confirms the flaw (e.g., default creds verified)
+</blackbox_methodology>
+
 <output_instructions>
 You MUST produce TWO outputs:
 

@@ -142,6 +142,37 @@ The `vulnerability` JSON object MUST follow this exact format:
 * Failing to differentiate between safe array-based command execution and unsafe string-based execution.
 </false_positives_to_avoid>
 
+<blackbox_methodology>
+## Blackbox Analysis Mode
+
+When NO source code is available ({{CODE_ANALYSIS}} is empty), switch to blackbox analysis:
+
+1. **Analyze Tool Findings:** Use the Tool Findings data to identify injection indicators:
+   - sqlmap confirmed injections (boolean-blind, time-blind, UNION-based, error-based)
+   - Error messages revealing SQL syntax (e.g., "You have an error in your SQL syntax")
+   - OS command output echoed in responses (e.g., `uid=`, directory listings)
+   - File inclusion patterns (e.g., `/etc/passwd` content in responses, PHP warnings)
+   - Path traversal indicators (e.g., `../` sequences succeeding in tool output)
+
+2. **Infer Attack Surface:** From discovered endpoints, parameters, and technologies:
+   - Login forms, search fields, URL parameters accepting user input
+   - API endpoints with ID/query parameters
+   - File upload/download handlers, import features
+
+3. **Generate Hypotheses:** Based on tool output patterns:
+   - Error-based SQL messages → likely unsanitized concatenation
+   - Reflected parameter values → potential injection points
+   - Technology fingerprints (PHP/MySQL, ASP/MSSQL) → target-specific payloads
+
+4. **Populate Queue:** Create exploitation queue entries using observed endpoints and parameters
+
+Adjust the vulnerability JSON format for blackbox mode:
+- `source`: Use the HTTP endpoint/parameter observed (e.g., "POST /login — username param")
+- `path`: Use "blackbox — inferred from [tool] output"
+- `sink_call`: Use "unknown — requires dynamic testing"
+- `confidence`: Cap at "medium" unless tool output confirms the flaw (e.g., sqlmap confirmed)
+</blackbox_methodology>
+
 <output_instructions>
 You MUST produce TWO outputs:
 
