@@ -49,7 +49,7 @@ bollard = "0.17"
 rusqlite = { version = "0.31", features = ["bundled"] }
 
 # Git operations
-git2 = "0.19"
+git2 = { version = "0.19", features = ["vendored-openssl", "vendored-libgit2"] }
 
 # Logging
 tracing = "0.1"

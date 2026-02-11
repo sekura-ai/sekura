@@ -1,0 +1,25 @@
+# Build artifacts
+/target/
+
+# Environment
+.env
+.env.*
+
+# Project runtime data
+/.sekura/
+/results/
+/repos/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Python bytecode (prompt scripts, etc.)
+__pycache__/
+*.py[cod]
