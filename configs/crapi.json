@@ -1,0 +1,7 @@
+{
+  "target": "http://localhost:8888",
+  "repo": "/Volumes/IMacExtend/code/agents/pentesting/sekura-rs/repos/crAPI",
+  "intensity": "thorough",
+  "provider": "gemini",
+  "rules_focus": "/api, /identity, /community, /workshop"
+}
