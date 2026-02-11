@@ -52,7 +52,15 @@ impl LLMProvider for OpenRouterProvider {
         let data: Value = resp.json().await
             .map_err(|e| SekuraError::LLMApi(format!("Parse error: {}", e)))?;
 
-        let content = data["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
+        if let Some(error) = data.get("error") {
+            return Err(SekuraError::LLMApi(
+                error["message"].as_str().unwrap_or("Unknown OpenRouter error").to_string()
+            ));
+        }
+
+        let content = data["choices"][0]["message"]["content"].as_str()
+            .ok_or_else(|| SekuraError::LLMApi("No content in OpenRouter response".into()))?
+            .to_string();
         let input_tokens = data["usage"]["prompt_tokens"].as_u64();
         let output_tokens = data["usage"]["completion_tokens"].as_u64();
 

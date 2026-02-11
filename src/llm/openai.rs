@@ -62,7 +62,8 @@ impl LLMProvider for OpenAIProvider {
         }
 
         let content = data["choices"][0]["message"]["content"].as_str()
-            .unwrap_or("").to_string();
+            .ok_or_else(|| SekuraError::LLMApi("No content in OpenAI response".into()))?
+            .to_string();
         let input_tokens = data["usage"]["prompt_tokens"].as_u64();
         let output_tokens = data["usage"]["completion_tokens"].as_u64();
 
@@ -100,7 +101,8 @@ impl LLMProvider for OpenAIProvider {
         let data: Value = resp.json().await
             .map_err(|e| SekuraError::LLMApi(format!("Parse error: {}", e)))?;
 
-        let content = data["choices"][0]["message"]["content"].as_str().unwrap_or("{}");
+        let content = data["choices"][0]["message"]["content"].as_str()
+            .ok_or_else(|| SekuraError::LLMApi("No content in OpenAI structured response".into()))?;
         serde_json::from_str(content)
             .map_err(|e| SekuraError::LLMApi(format!("Invalid JSON: {}", e)))
     }

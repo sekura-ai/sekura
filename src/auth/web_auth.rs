@@ -10,6 +10,20 @@ const LOGIN_PATHS: &[&str] = &[
     "/wp-login.php", "/administrator/",
 ];
 
+/// Known CSRF/anti-forgery token field names across major frameworks
+const CSRF_FIELD_NAMES: &[&str] = &[
+    "user_token",            // DVWA
+    "csrf_token",            // Generic / Flask-WTF
+    "csrftoken",             // Generic
+    "csrf-token",            // Generic
+    "_token",                // Laravel
+    "csrfmiddlewaretoken",   // Django
+    "authenticity_token",    // Rails
+    "_csrf",                 // Express/csurf
+    "__RequestVerificationToken", // ASP.NET
+    "token",                 // Generic fallback
+];
+
 pub struct WebAuthenticator {
     container: Arc<ContainerManager>,
     target_url: String,
@@ -68,8 +82,8 @@ impl WebAuthenticator {
             password,
         );
 
-        if let Some(csrf) = &csrf_token {
-            cmd.push_str(&format!(" -d 'csrf_token={}'", csrf));
+        if let Some((field_name, csrf_value)) = &csrf_token {
+            cmd.push_str(&format!(" -d '{}={}'", field_name, csrf_value));
         }
 
         let output = self.container.exec(&cmd, 30).await?;
@@ -106,21 +120,30 @@ impl WebAuthenticator {
         )))
     }
 
-    async fn extract_csrf_token(&self, login_url: &str) -> Result<Option<String>, SekuraError> {
+    async fn extract_csrf_token(&self, login_url: &str) -> Result<Option<(String, String)>, SekuraError> {
+        // Fetch the login page and extract all hidden input fields
         let cmd = format!(
-            "curl -s -c {} '{}' | grep -oP 'name=\"csrf[_-]?token\"\\s+value=\"\\K[^\"]*'",
+            "curl -s -c {} '{}' | grep -oP '<input[^>]+type=\"hidden\"[^>]*>' | grep -oP 'name=\"\\K[^\"]*|value=\"\\K[^\"]*'",
             self.cookie_file.display(),
             login_url
         );
         let output = self.container.exec(&cmd, 15).await?;
-        let token = output.trim();
-        if token.is_empty() {
-            debug!("No CSRF token found on login page");
-            Ok(None)
-        } else {
-            debug!(token_len = token.len(), "CSRF token extracted");
-            Ok(Some(token.to_string()))
+        let tokens: Vec<&str> = output.lines().collect();
+
+        // Parse name/value pairs (grep outputs alternating name, value lines)
+        let mut i = 0;
+        while i + 1 < tokens.len() {
+            let field_name = tokens[i].trim();
+            let field_value = tokens[i + 1].trim();
+            if CSRF_FIELD_NAMES.iter().any(|known| field_name.eq_ignore_ascii_case(known)) {
+                debug!(field = %field_name, value_len = field_value.len(), "CSRF token extracted");
+                return Ok(Some((field_name.to_string(), field_value.to_string())));
+            }
+            i += 2;
         }
+
+        debug!("No CSRF token found on login page");
+        Ok(None)
     }
 
     async fn verify_auth(&self) -> Result<bool, SekuraError> {

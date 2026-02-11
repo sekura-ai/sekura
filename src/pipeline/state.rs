@@ -208,7 +208,7 @@ impl ScanContext {
         }
     }
 
-    fn extract_open_ports(&mut self, nmap_output: &str) {
+    pub fn extract_open_ports(&mut self, nmap_output: &str) {
         let port_regex = regex::Regex::new(r"(\d+)/tcp\s+open").unwrap();
         for cap in port_regex.captures_iter(nmap_output) {
             if let Ok(port) = cap[1].parse::<u16>() {

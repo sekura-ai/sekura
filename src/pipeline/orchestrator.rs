@@ -331,10 +331,36 @@ impl PipelineOrchestrator {
         // Phase 1: White-box analysis
         if self.config.has_repo() && !self.config.skip_whitebox {
             self.check_cancelled().await?;
+            self.check_cost_budget().await?;
             info!("Phase 1: White-box Analysis");
             self.set_phase(PhaseName::WhiteboxAnalysis).await;
             self.emit_phase_started(&PhaseName::WhiteboxAnalysis);
-            // White-box analysis would run here
+
+            let analyzer = crate::whitebox::analyzer::WhiteboxAnalyzer::new(
+                self.llm.clone(),
+                &self.config.repo_path,
+                self.prompt_loader.clone(),
+            );
+
+            match analyzer.analyze().await {
+                Ok(analysis) => {
+                    let deliverable_path = self.config.deliverables_dir().join("code_analysis_deliverable.md");
+                    let content = format!(
+                        "# White-box Code Analysis\n\n{}\n",
+                        analysis.architecture
+                    );
+                    tokio::fs::write(&deliverable_path, &content).await?;
+                    context.code_analysis = Some(deliverable_path.clone());
+                    info!(path = %deliverable_path.display(), "Wrote code analysis deliverable");
+                }
+                Err(e) => {
+                    warn!(error = %e, "White-box analysis failed — continuing without code analysis");
+                    self.audit.record_event(AuditEvent::Warning {
+                        message: format!("White-box analysis failed: {}", e),
+                    }).await;
+                }
+            }
+
             self.emit_phase_completed(&PhaseName::WhiteboxAnalysis);
             info!("Phase 1 complete");
         }

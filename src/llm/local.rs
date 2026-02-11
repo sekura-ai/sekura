@@ -49,7 +49,9 @@ impl LLMProvider for LocalProvider {
         let data: Value = resp.json().await
             .map_err(|e| SekuraError::LLMApi(format!("Parse error: {}", e)))?;
 
-        let content = data["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
+        let content = data["choices"][0]["message"]["content"].as_str()
+            .ok_or_else(|| SekuraError::LLMApi("No content in local LLM response".into()))?
+            .to_string();
 
         Ok(LLMResponse { content, input_tokens: None, output_tokens: None, cost_usd: None, model: self.model.clone() })
     }

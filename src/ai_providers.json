@@ -1,0 +1,795 @@
+{
+  "providers": {
+    "anthropic": {
+      "name": "Anthropic",
+      "base_url": "https://api.anthropic.com/v1",
+      "auth_header": "x-api-key",
+      "key_prefix": "sk-ant-",
+      "docs_url": "https://docs.anthropic.com",
+      "models": [
+        {
+          "id": "claude-opus-4-20250514",
+          "name": "Claude Opus 4",
+          "context_window": 200000,
+          "max_output": 32000,
+          "supports_vision": true,
+          "supports_tools": true
+        },
+        {
+          "id": "claude-sonnet-4-20250514",
+          "name": "Claude Sonnet 4",
+          "context_window": 200000,
+          "max_output": 16000,
+          "supports_vision": true,
+          "supports_tools": true
+        },
+        {
+          "id": "claude-sonnet-4-5-20250929",
+          "name": "Claude Sonnet 4.5",
+          "context_window": 200000,
+          "max_output": 16000,
+          "supports_vision": true,
+          "supports_tools": true
+        },
+        {
+          "id": "claude-haiku-4-5-20251001",
+          "name": "Claude Haiku 4.5",
+          "context_window": 200000,
+          "max_output": 8192,
+          "supports_vision": true,
+          "supports_tools": true
+        },
+        {
+          "id": "claude-3-5-sonnet-20241022",
+          "name": "Claude 3.5 Sonnet v2",
+          "context_window": 200000,
+          "max_output": 8192,
+          "supports_vision": true,
+          "supports_tools": true
+        },
+        {
+          "id": "claude-3-5-haiku-20241022",
+          "name": "Claude 3.5 Haiku",
+          "context_window": 200000,
+          "max_output": 8192,
+          "supports_vision": true,
+          "supports_tools": true
+        }
+      ]
+    },
+    "openai": {
+      "name": "OpenAI",
+      "base_url": "https://api.openai.com/v1",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "key_prefix": "sk-",
+      "docs_url": "https://platform.openai.com/docs",
+      "models": [
+        {
+          "id": "gpt-4.1",
+          "name": "GPT-4.1",
+          "context_window": 1047576,
+          "max_output": 32768,
+          "supports_vision": true,
+          "supports_tools": true
+        },
+        {
+          "id": "gpt-4.1-mini",
+          "name": "GPT-4.1 Mini",
+          "context_window": 1047576,
+          "max_output": 32768,
+          "supports_vision": true,
+          "supports_tools": true
+        },
+        {
+          "id": "gpt-4.1-nano",
+          "name": "GPT-4.1 Nano",
+          "context_window": 1047576,
+          "max_output": 32768,
+          "supports_vision": true,
+          "supports_tools": true
+        },
+        {
+          "id": "o4-mini",
+          "name": "o4-mini",
+          "context_window": 200000,
+          "max_output": 100000,
+          "supports_vision": true,
+          "supports_tools": true,
+          "reasoning": true
+        },
+        {
+          "id": "o3",
+          "name": "o3",
+          "context_window": 200000,
+          "max_output": 100000,
+          "supports_vision": true,
+          "supports_tools": true,
+          "reasoning": true
+        },
+        {
+          "id": "o3-mini",
+          "name": "o3-mini",
+          "context_window": 200000,
+          "max_output": 100000,
+          "supports_vision": false,
+          "supports_tools": true,
+          "reasoning": true
+        },
+        {
+          "id": "o1",
+          "name": "o1",
+          "context_window": 200000,
+          "max_output": 100000,
+          "supports_vision": true,
+          "supports_tools": true,
+          "reasoning": true
+        },
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "context_window": 128000,
+          "max_output": 16384,
+          "supports_vision": true,
+          "supports_tools": true
+        },
+        {
+          "id": "gpt-4o-mini",
+          "name": "GPT-4o Mini",
+          "context_window": 128000,
+          "max_output": 16384,
+          "supports_vision": true,
+          "supports_tools": true
+        }
+      ]
+    },
+    "google": {
+      "name": "Google AI (Gemini)",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta",
+      "auth_method": "api_key_param",
+      "docs_url": "https://ai.google.dev/docs",
+      "models": [
+        {
+          "id": "gemini-2.5-pro",
+          "name": "Gemini 2.5 Pro",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "supports_vision": true,
+          "supports_tools": true,
+          "reasoning": true
+        },
+        {
+          "id": "gemini-2.5-flash",
+          "name": "Gemini 2.5 Flash",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "supports_vision": true,
+          "supports_tools": true,
+          "reasoning": true
+        },
+        {
+          "id": "gemini-2.0-flash",
+          "name": "Gemini 2.0 Flash",
+          "context_window": 1048576,
+          "max_output": 8192,
+          "supports_vision": true,
+          "supports_tools": true
+        },
+        {
+          "id": "gemini-2.0-flash-lite",
+          "name": "Gemini 2.0 Flash Lite",
+          "context_window": 1048576,
+          "max_output": 8192,
+          "supports_vision": true,
+          "supports_tools": true
+        },
+        {
+          "id": "gemini-1.5-pro",
+          "name": "Gemini 1.5 Pro",
+          "context_window": 2097152,
+          "max_output": 8192,
+          "supports_vision": true,
+          "supports_tools": true
+        },
+        {
+          "id": "gemini-1.5-flash",
+          "name": "Gemini 1.5 Flash",
+          "context_window": 1048576,
+          "max_output": 8192,
+          "supports_vision": true,
+          "supports_tools": true
+        }
+      ]
+    },
+    "google_vertex": {
+      "name": "Google Cloud Vertex AI",
+      "base_url": "https://{region}-aiplatform.googleapis.com/v1",
+      "auth_method": "oauth2_service_account",
+      "docs_url": "https://cloud.google.com/vertex-ai/docs",
+      "requires": ["project_id", "region", "service_account_json"],
+      "models": [
+        {
+          "id": "gemini-2.5-pro",
+          "name": "Gemini 2.5 Pro (Vertex)",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "supports_vision": true,
+          "supports_tools": true
+        },
+        {
+          "id": "gemini-2.5-flash",
+          "name": "Gemini 2.5 Flash (Vertex)",
+          "context_window": 1048576,
+          "max_output": 65536,
+          "supports_vision": true,
+          "supports_tools": true
+        }
+      ]
+    },
+    "xai": {
+      "name": "xAI",
+      "base_url": "https://api.x.ai/v1",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "docs_url": "https://docs.x.ai",
+      "openai_compatible": true,
+      "models": [
+        {
+          "id": "grok-3",
+          "name": "Grok 3",
+          "context_window": 131072,
+          "max_output": 16384,
+          "supports_vision": true,
+          "supports_tools": true
+        },
+        {
+          "id": "grok-3-mini",
+          "name": "Grok 3 Mini",
+          "context_window": 131072,
+          "max_output": 16384,
+          "supports_vision": true,
+          "supports_tools": true,
+          "reasoning": true
+        },
+        {
+          "id": "grok-2",
+          "name": "Grok 2",
+          "context_window": 131072,
+          "max_output": 16384,
+          "supports_vision": true,
+          "supports_tools": true
+        }
+      ]
+    },
+    "mistral": {
+      "name": "Mistral AI",
+      "base_url": "https://api.mistral.ai/v1",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "docs_url": "https://docs.mistral.ai",
+      "openai_compatible": true,
+      "models": [
+        {
+          "id": "mistral-large-latest",
+          "name": "Mistral Large",
+          "context_window": 128000,
+          "max_output": 8192,
+          "supports_vision": false,
+          "supports_tools": true
+        },
+        {
+          "id": "mistral-medium-latest",
+          "name": "Mistral Medium",
+          "context_window": 128000,
+          "max_output": 8192,
+          "supports_vision": false,
+          "supports_tools": true
+        },
+        {
+          "id": "mistral-small-latest",
+          "name": "Mistral Small",
+          "context_window": 128000,
+          "max_output": 8192,
+          "supports_vision": false,
+          "supports_tools": true
+        },
+        {
+          "id": "codestral-latest",
+          "name": "Codestral",
+          "context_window": 256000,
+          "max_output": 8192,
+          "supports_vision": false,
+          "supports_tools": true
+        },
+        {
+          "id": "pixtral-large-latest",
+          "name": "Pixtral Large",
+          "context_window": 128000,
+          "max_output": 8192,
+          "supports_vision": true,
+          "supports_tools": true
+        },
+        {
+          "id": "ministral-8b-latest",
+          "name": "Ministral 8B",
+          "context_window": 128000,
+          "max_output": 8192,
+          "supports_vision": false,
+          "supports_tools": true
+        }
+      ]
+    },
+    "cohere": {
+      "name": "Cohere",
+      "base_url": "https://api.cohere.com/v2",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "docs_url": "https://docs.cohere.com",
+      "models": [
+        {
+          "id": "command-r-plus",
+          "name": "Command R+",
+          "context_window": 128000,
+          "max_output": 4096,
+          "supports_vision": false,
+          "supports_tools": true
+        },
+        {
+          "id": "command-r",
+          "name": "Command R",
+          "context_window": 128000,
+          "max_output": 4096,
+          "supports_vision": false,
+          "supports_tools": true
+        },
+        {
+          "id": "command-a",
+          "name": "Command A",
+          "context_window": 256000,
+          "max_output": 8192,
+          "supports_vision": false,
+          "supports_tools": true
+        }
+      ]
+    },
+    "meta_llama": {
+      "name": "Meta (via Together/Groq/Fireworks)",
+      "note": "Meta models are open-weight; access via hosting providers below",
+      "models": [
+        {
+          "id": "meta-llama/Llama-4-Maverick-17B-128E",
+          "name": "Llama 4 Maverick",
+          "context_window": 1048576,
+          "max_output": 16384,
+          "supports_vision": true,
+          "supports_tools": true,
+          "open_weight": true
+        },
+        {
+          "id": "meta-llama/Llama-4-Scout-17B-16E",
+          "name": "Llama 4 Scout",
+          "context_window": 10485760,
+          "max_output": 16384,
+          "supports_vision": true,
+          "supports_tools": true,
+          "open_weight": true
+        },
+        {
+          "id": "meta-llama/Llama-3.3-70B-Instruct",
+          "name": "Llama 3.3 70B",
+          "context_window": 131072,
+          "max_output": 8192,
+          "supports_vision": false,
+          "supports_tools": true,
+          "open_weight": true
+        },
+        {
+          "id": "meta-llama/Llama-3.1-405B-Instruct",
+          "name": "Llama 3.1 405B",
+          "context_window": 131072,
+          "max_output": 8192,
+          "supports_vision": false,
+          "supports_tools": true,
+          "open_weight": true
+        },
+        {
+          "id": "meta-llama/Llama-3.1-70B-Instruct",
+          "name": "Llama 3.1 70B",
+          "context_window": 131072,
+          "max_output": 8192,
+          "supports_vision": false,
+          "supports_tools": true,
+          "open_weight": true
+        },
+        {
+          "id": "meta-llama/Llama-3.1-8B-Instruct",
+          "name": "Llama 3.1 8B",
+          "context_window": 131072,
+          "max_output": 8192,
+          "supports_vision": false,
+          "supports_tools": true,
+          "open_weight": true
+        }
+      ]
+    },
+    "deepseek": {
+      "name": "DeepSeek",
+      "base_url": "https://api.deepseek.com/v1",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "docs_url": "https://platform.deepseek.com/docs",
+      "openai_compatible": true,
+      "models": [
+        {
+          "id": "deepseek-chat",
+          "name": "DeepSeek V3",
+          "context_window": 65536,
+          "max_output": 8192,
+          "supports_vision": false,
+          "supports_tools": true
+        },
+        {
+          "id": "deepseek-reasoner",
+          "name": "DeepSeek R1",
+          "context_window": 65536,
+          "max_output": 8192,
+          "supports_vision": false,
+          "supports_tools": false,
+          "reasoning": true
+        }
+      ]
+    },
+    "together": {
+      "name": "Together AI",
+      "base_url": "https://api.together.xyz/v1",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "docs_url": "https://docs.together.ai",
+      "openai_compatible": true,
+      "note": "Hosts open-weight models including Llama, Qwen, DeepSeek, Mistral",
+      "models": [
+        {
+          "id": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+          "name": "Llama 4 Maverick (FP8)"
+        },
+        {
+          "id": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+          "name": "Llama 3.3 70B Turbo"
+        },
+        {
+          "id": "deepseek-ai/DeepSeek-R1",
+          "name": "DeepSeek R1"
+        },
+        {
+          "id": "deepseek-ai/DeepSeek-V3",
+          "name": "DeepSeek V3"
+        },
+        {
+          "id": "Qwen/Qwen2.5-72B-Instruct-Turbo",
+          "name": "Qwen 2.5 72B Turbo"
+        },
+        {
+          "id": "google/gemma-2-27b-it",
+          "name": "Gemma 2 27B"
+        }
+      ]
+    },
+    "groq": {
+      "name": "Groq",
+      "base_url": "https://api.groq.com/openai/v1",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "docs_url": "https://console.groq.com/docs",
+      "openai_compatible": true,
+      "note": "Ultra-fast inference on LPU hardware",
+      "models": [
+        {
+          "id": "llama-3.3-70b-versatile",
+          "name": "Llama 3.3 70B"
+        },
+        {
+          "id": "llama-3.1-8b-instant",
+          "name": "Llama 3.1 8B"
+        },
+        {
+          "id": "deepseek-r1-distill-llama-70b",
+          "name": "DeepSeek R1 Distill 70B"
+        },
+        {
+          "id": "gemma2-9b-it",
+          "name": "Gemma 2 9B"
+        },
+        {
+          "id": "mixtral-8x7b-32768",
+          "name": "Mixtral 8x7B"
+        },
+        {
+          "id": "qwen-qwq-32b",
+          "name": "Qwen QwQ 32B"
+        }
+      ]
+    },
+    "fireworks": {
+      "name": "Fireworks AI",
+      "base_url": "https://api.fireworks.ai/inference/v1",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "docs_url": "https://docs.fireworks.ai",
+      "openai_compatible": true,
+      "models": [
+        {
+          "id": "accounts/fireworks/models/llama-v3p3-70b-instruct",
+          "name": "Llama 3.3 70B"
+        },
+        {
+          "id": "accounts/fireworks/models/deepseek-v3",
+          "name": "DeepSeek V3"
+        },
+        {
+          "id": "accounts/fireworks/models/deepseek-r1",
+          "name": "DeepSeek R1"
+        },
+        {
+          "id": "accounts/fireworks/models/qwen2p5-72b-instruct",
+          "name": "Qwen 2.5 72B"
+        }
+      ]
+    },
+    "openrouter": {
+      "name": "OpenRouter",
+      "base_url": "https://openrouter.ai/api/v1",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "docs_url": "https://openrouter.ai/docs",
+      "openai_compatible": true,
+      "note": "Unified gateway to 200+ models from all providers",
+      "models": [
+        {
+          "id": "anthropic/claude-sonnet-4",
+          "name": "Claude Sonnet 4 (via OpenRouter)"
+        },
+        {
+          "id": "openai/gpt-4.1",
+          "name": "GPT-4.1 (via OpenRouter)"
+        },
+        {
+          "id": "google/gemini-2.5-pro",
+          "name": "Gemini 2.5 Pro (via OpenRouter)"
+        },
+        {
+          "id": "meta-llama/llama-4-maverick",
+          "name": "Llama 4 Maverick (via OpenRouter)"
+        },
+        {
+          "id": "deepseek/deepseek-r1",
+          "name": "DeepSeek R1 (via OpenRouter)"
+        }
+      ]
+    },
+    "perplexity": {
+      "name": "Perplexity",
+      "base_url": "https://api.perplexity.ai",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "docs_url": "https://docs.perplexity.ai",
+      "openai_compatible": true,
+      "models": [
+        {
+          "id": "sonar-pro",
+          "name": "Sonar Pro",
+          "context_window": 200000,
+          "supports_vision": false,
+          "supports_tools": false,
+          "online_search": true
+        },
+        {
+          "id": "sonar",
+          "name": "Sonar",
+          "context_window": 128000,
+          "supports_vision": false,
+          "supports_tools": false,
+          "online_search": true
+        },
+        {
+          "id": "sonar-reasoning-pro",
+          "name": "Sonar Reasoning Pro",
+          "context_window": 128000,
+          "supports_vision": false,
+          "supports_tools": false,
+          "online_search": true,
+          "reasoning": true
+        },
+        {
+          "id": "sonar-reasoning",
+          "name": "Sonar Reasoning",
+          "context_window": 128000,
+          "supports_vision": false,
+          "supports_tools": false,
+          "online_search": true,
+          "reasoning": true
+        }
+      ]
+    },
+    "aws_bedrock": {
+      "name": "AWS Bedrock",
+      "base_url": "https://bedrock-runtime.{region}.amazonaws.com",
+      "auth_method": "aws_sigv4",
+      "docs_url": "https://docs.aws.amazon.com/bedrock",
+      "requires": ["aws_access_key_id", "aws_secret_access_key", "region"],
+      "models": [
+        {
+          "id": "anthropic.claude-sonnet-4-20250514-v1:0",
+          "name": "Claude Sonnet 4 (Bedrock)"
+        },
+        {
+          "id": "anthropic.claude-haiku-4-5-20251001-v1:0",
+          "name": "Claude Haiku 4.5 (Bedrock)"
+        },
+        {
+          "id": "amazon.nova-pro-v1:0",
+          "name": "Amazon Nova Pro"
+        },
+        {
+          "id": "amazon.nova-lite-v1:0",
+          "name": "Amazon Nova Lite"
+        },
+        {
+          "id": "amazon.nova-micro-v1:0",
+          "name": "Amazon Nova Micro"
+        },
+        {
+          "id": "meta.llama3-3-70b-instruct-v1:0",
+          "name": "Llama 3.3 70B (Bedrock)"
+        },
+        {
+          "id": "mistral.mistral-large-2407-v1:0",
+          "name": "Mistral Large (Bedrock)"
+        }
+      ]
+    },
+    "azure_openai": {
+      "name": "Azure OpenAI",
+      "base_url": "https://{resource_name}.openai.azure.com/openai/deployments/{deployment_name}",
+      "auth_header": "api-key",
+      "docs_url": "https://learn.microsoft.com/en-us/azure/ai-services/openai",
+      "requires": ["resource_name", "deployment_name", "api_version"],
+      "models": [
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o (Azure)"
+        },
+        {
+          "id": "gpt-4o-mini",
+          "name": "GPT-4o Mini (Azure)"
+        },
+        {
+          "id": "o3",
+          "name": "o3 (Azure)"
+        },
+        {
+          "id": "o3-mini",
+          "name": "o3-mini (Azure)"
+        }
+      ]
+    },
+    "alibaba_qwen": {
+      "name": "Alibaba Cloud (Qwen)",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "docs_url": "https://help.aliyun.com/zh/model-studio",
+      "openai_compatible": true,
+      "models": [
+        {
+          "id": "qwen-max",
+          "name": "Qwen Max",
+          "context_window": 32768,
+          "supports_vision": false,
+          "supports_tools": true
+        },
+        {
+          "id": "qwen-plus",
+          "name": "Qwen Plus",
+          "context_window": 131072,
+          "supports_vision": false,
+          "supports_tools": true
+        },
+        {
+          "id": "qwen-turbo",
+          "name": "Qwen Turbo",
+          "context_window": 1000000,
+          "supports_vision": false,
+          "supports_tools": true
+        },
+        {
+          "id": "qwen-vl-max",
+          "name": "Qwen VL Max",
+          "context_window": 32768,
+          "supports_vision": true,
+          "supports_tools": true
+        },
+        {
+          "id": "qwq-plus",
+          "name": "QwQ Plus",
+          "context_window": 131072,
+          "supports_vision": false,
+          "supports_tools": true,
+          "reasoning": true
+        }
+      ]
+    },
+    "ai21": {
+      "name": "AI21 Labs",
+      "base_url": "https://api.ai21.com/studio/v1",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "docs_url": "https://docs.ai21.com",
+      "models": [
+        {
+          "id": "jamba-1.5-large",
+          "name": "Jamba 1.5 Large",
+          "context_window": 256000,
+          "supports_vision": false,
+          "supports_tools": true
+        },
+        {
+          "id": "jamba-1.5-mini",
+          "name": "Jamba 1.5 Mini",
+          "context_window": 256000,
+          "supports_vision": false,
+          "supports_tools": true
+        }
+      ]
+    },
+    "sambanova": {
+      "name": "SambaNova",
+      "base_url": "https://api.sambanova.ai/v1",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "docs_url": "https://community.sambanova.ai/docs",
+      "openai_compatible": true,
+      "models": [
+        {
+          "id": "Meta-Llama-3.3-70B-Instruct",
+          "name": "Llama 3.3 70B"
+        },
+        {
+          "id": "DeepSeek-R1",
+          "name": "DeepSeek R1"
+        },
+        {
+          "id": "Qwen2.5-72B-Instruct",
+          "name": "Qwen 2.5 72B"
+        }
+      ]
+    },
+    "cerebras": {
+      "name": "Cerebras",
+      "base_url": "https://api.cerebras.ai/v1",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "docs_url": "https://docs.cerebras.ai",
+      "openai_compatible": true,
+      "note": "Ultra-fast inference on wafer-scale hardware",
+      "models": [
+        {
+          "id": "llama-3.3-70b",
+          "name": "Llama 3.3 70B"
+        },
+        {
+          "id": "llama-3.1-8b",
+          "name": "Llama 3.1 8B"
+        },
+        {
+          "id": "deepseek-r1-distill-llama-70b",
+          "name": "DeepSeek R1 Distill 70B"
+        }
+      ]
+    }
+  },
+  "_meta": {
+    "version": "1.0.0",
+    "last_updated": "2025-02-10",
+    "notes": "Model IDs and availability may change. Check provider docs for latest. Context windows and output limits in tokens. Models marked openai_compatible use the OpenAI chat completions API format."
+  }
+}

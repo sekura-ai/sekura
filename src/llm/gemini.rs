@@ -61,7 +61,9 @@ impl LLMProvider for GeminiProvider {
         }
 
         let content = data["candidates"][0]["content"]["parts"][0]["text"]
-            .as_str().unwrap_or("").to_string();
+            .as_str()
+            .ok_or_else(|| SekuraError::LLMApi("No content in Gemini response".into()))?
+            .to_string();
 
         let input_tokens = data["usageMetadata"]["promptTokenCount"].as_u64();
         let output_tokens = data["usageMetadata"]["candidatesTokenCount"].as_u64();

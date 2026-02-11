@@ -79,6 +79,9 @@ pub async fn run_vuln_analysis(
 
     info!(vuln_type = %vuln_type.as_str(), "Running LLM vulnerability analysis");
     let response = llm.complete(&prompt, Some(&system)).await?;
+    if response.content.trim().is_empty() {
+        warn!(vuln_type = %vuln_type.as_str(), "LLM returned empty content for vuln analysis");
+    }
     let cost_usd = response.cost_usd;
 
     // Write the analysis deliverable

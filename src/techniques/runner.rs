@@ -139,7 +139,7 @@ impl TechniqueRunner {
     }
 
     pub async fn run_techniques(
-        &self,
+        &mut self,
         techniques: &[TechniqueDefinition],
         layer: &str,
     ) -> Result<(Vec<Finding>, HashMap<String, String>), SekuraError> {
@@ -248,6 +248,10 @@ impl TechniqueRunner {
                         audit.record_container_exec(&command, 0, duration_ms, output.len()).await;
                     }
                     raw_outputs.insert(technique.name.clone(), output.clone());
+
+                    // Propagate discovered ports within the same layer so subsequent
+                    // techniques (e.g. Service Version Detection) can resolve {open_ports}
+                    self.context.extract_open_ports(&output);
 
                     // Analyze output using LLM (with regex fallback)
                     let hint = technique.parse_hint.as_deref().unwrap_or("");
